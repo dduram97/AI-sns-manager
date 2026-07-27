@@ -5,19 +5,6 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import type { TodaySummaryViewModel } from "@/types/todaySummary";
 
-function scrollToApprovalSection() {
-  const headings = document.querySelectorAll("h2");
-  for (const heading of headings) {
-    if (heading.textContent?.trim() === "Approval Inbox") {
-      heading.closest("section")?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-      return;
-    }
-  }
-}
-
 function TaskProgress({
   completed,
   total,
@@ -87,7 +74,7 @@ function buildTodayTasks(data: TodaySummaryViewModel): TodayTask[] {
       unit: "건",
       completedLabel: "오늘 완료",
       actionLabel: "처리하기",
-      onAction: scrollToApprovalSection,
+      href: "/today/approvals",
     },
     {
       id: "neighbor-request",

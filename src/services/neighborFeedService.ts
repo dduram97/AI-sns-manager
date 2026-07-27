@@ -86,6 +86,15 @@ function postAgeDays(iso: string | null | undefined): number | null {
   return (Date.now() - t) / 86_400_000;
 }
 
+/**
+ * Neighbor-feed CDP scrape needs a local Chrome debugging port.
+ * Vercel serverless cannot reach it — stay RSS-only there.
+ * Local / non-Vercel keeps capped CDP fallback.
+ */
+function isNeighborFeedCdpFallbackAllowed(): boolean {
+  return process.env.VERCEL !== "1";
+}
+
 function isInFeedPool(
   meta: Record<string, unknown>,
   stage: string,
@@ -463,7 +472,8 @@ export async function scanNeighborFeedBatch(input: {
   const perBlogLatest = new Map<string, FeedCandidate>();
   const sourceStats = { rss: 0, cdp: 0, fail: 0 };
   let postsSeen = 0;
-  let cdpLeft = Math.max(0, input.cdpBudget);
+  const cdpAllowed = isNeighborFeedCdpFallbackAllowed();
+  let cdpLeft = cdpAllowed ? Math.max(0, input.cdpBudget) : 0;
 
   const members = input.members;
   const eligible: NeighborFeedPoolMember[] = [];
@@ -500,6 +510,12 @@ export async function scanNeighborFeedBatch(input: {
     } else {
       needCdp.push(row.member);
     }
+  }
+
+  if (!cdpAllowed && needCdp.length > 0) {
+    console.info(
+      `[neighbor-feed] CDP fallback skipped (VERCEL=1; RSS-only) blogs=${needCdp.length}`,
+    );
   }
 
   for (const member of needCdp) {

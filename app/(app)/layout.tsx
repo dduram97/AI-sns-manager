@@ -1,4 +1,4 @@
-import { TabBar } from "@/components/shell/TabBar";
+import { AppShell } from "@/components/shell/AppShell";
 import { QueryProvider } from "@/components/providers/QueryProvider";
 
 export default function AppLayout({
@@ -8,8 +8,7 @@ export default function AppLayout({
 }) {
   return (
     <QueryProvider>
-      <main className="min-h-dvh">{children}</main>
-      <TabBar />
+      <AppShell>{children}</AppShell>
     </QueryProvider>
   );
 }

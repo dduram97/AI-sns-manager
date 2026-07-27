@@ -155,6 +155,24 @@ export function MoreScreen({ data }: { data: MoreScreenData }) {
         >
           Agent 발굴 검토 →
         </Link>
+        <Link
+          href="/admin/discovery"
+          className="rounded-xl border border-border/70 bg-card px-4 py-3 text-sm font-medium hover:bg-secondary/40"
+        >
+          Discovery 승인 관리 →
+        </Link>
+        <Link
+          href="/admin/actions"
+          className="rounded-xl border border-border/70 bg-card px-4 py-3 text-sm font-medium hover:bg-secondary/40"
+        >
+          Action 실행 이력 →
+        </Link>
+        <Link
+          href="/admin/neighbors"
+          className="rounded-xl border border-border/70 bg-card px-4 py-3 text-sm font-medium hover:bg-secondary/40"
+        >
+          이웃추가 성과 추적 →
+        </Link>
       </div>
 
       {/* A. Agent Policy */}

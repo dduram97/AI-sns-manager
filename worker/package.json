@@ -1,0 +1,30 @@
+{
+  "name": "ai-sns-manager-cdp-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --import tsx src/index.ts",
+    "check:naver": "node --import tsx src/checkNaver.ts",
+    "test:create-visit": "node --import tsx scripts/create-test-visit-job.ts",
+    "test:create-like": "node --import tsx scripts/create-test-like-job.ts",
+    "test:create-comment": "node --import tsx scripts/create-test-comment-job.ts",
+    "test:create-neighbor": "node --import tsx scripts/create-test-neighbor-job.ts",
+    "discover:candidates": "node --import tsx scripts/run-candidate-discovery.ts",
+    "check:safety": "node --import tsx scripts/check-safety.ts",
+    "approve:job": "node --import tsx scripts/approve-job.ts",
+    "approve:candidates": "node --import tsx scripts/approve-candidates.ts",
+    "test:clear": "node --import tsx scripts/clear-test-action-jobs.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.110.8",
+    "dotenv": "^17.4.2",
+    "playwright": "^1.62.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
