@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel./sharedon",
+  "crons": [
+    {
+      "path": "/api/agent/tick",
+      "schedule": "*/15 * * * *"
+    }
+  ]
+}

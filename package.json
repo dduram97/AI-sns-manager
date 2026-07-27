@@ -1,0 +1,51 @@
+{
+  "name": "ai-sns-manager",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "tick": "node --import tsx scripts/run-tick.ts",
+    "seed": "node --import tsx scripts/seed.ts",
+    "verify:neighbor-feed-schedule": "node --import ./scripts/stub-server-only.mjs --import tsx scripts/verify-neighbor-feed-schedule.ts",
+    "verify:loop": "node --import tsx scripts/verify-agent-loop.ts",
+    "verify:loop:clean": "node --import tsx scripts/verify-cleanup.ts",
+    "verify:naver": "node --import tsx scripts/verify-naver-live.ts",
+    "verify:naver:plan": "node --import tsx scripts/verify-naver-live.ts -- --plan-only",
+    "verify:naver:actions": "node --import tsx scripts/verify-naver-actions.ts",
+    "draft:comment": "node --import tsx scripts/draft-comment.ts",
+    "analyze:like-session": "node --import tsx scripts/analyze-like-session.ts",
+    "naver:login": "node --import tsx scripts/naver-login.ts",
+    "typecheck": "tsc --noEmit",
+    "playwright:install": "playwright install chromium"
+  },
+  "dependencies": {
+    "@radix-ui/react-collapsible": "^1.1.20",
+    "@radix-ui/react-slot": "^1.3.3",
+    "@supabase/supabase-js": "^2.110.8",
+    "@tanstack/react-query": "^5.101.4",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "dotenv": "^17.4.2",
+    "lucide-react": "^1.26.0",
+    "next": "^15.5.21",
+    "openai": "^6.49.0",
+    "playwright": "^1.62.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "server-only": "^0.0.1",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "autoprefixer": "^10.5.4",
+    "postcss": "^8.5.23",
+    "tailwindcss": "^3.4.19",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

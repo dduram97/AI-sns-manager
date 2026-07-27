@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 40 20% 98%;
+  --foreground: 24 10% 10%;
+  --card: 0 0% 100%;
+  --card-foreground: 24 10% 10%;
+  --primary: 24 10% 12%;
+  --primary-foreground: 40 20% 98%;
+  --secondary: 40 12% 94%;
+  --secondary-foreground: 24 10% 20%;
+  --muted: 40 10% 94%;
+  --muted-foreground: 25 5% 42%;
+  --accent: 40 12% 94%;
+  --accent-foreground: 24 10% 12%;
+  --destructive: 0 72% 46%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 30 10% 88%;
+  --input: 30 10% 88%;
+  --ring: 24 10% 20%;
+  --radius: 0.75rem;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+body {
+  min-height: 100dvh;
+  background:
+    radial-gradient(1200px 500px at 10% -10%, hsl(40 30% 94%), transparent 55%),
+    hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-feature-settings: "ss01" on, "cv11" on;
+  -webkit-font-smoothing: antialiased;
+}

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent example — start CDP Chrome at macOS login.
+
+  1) Copy and edit paths:
+       cp scripts/com.naver.cdp.chrome.plist.example \
+          ~/Library/LaunchAgents/com.naver.cdp.chrome.plist
+
+  2) Replace EVERY occurrence of:
+       REPLACE_WITH_ABSOLUTE_PROJECT_ROOT
+     with your project absolute path, e.g.:
+       /Users/dohee/Desktop/바이브코딩/AI SNS Manager
+
+  3) Load:
+       launchctl unload ~/Library/LaunchAgents/com.naver.cdp.chrome.plist 2>/dev/null || true
+       launchctl load  ~/Library/LaunchAgents/com.naver.cdp.chrome.plist
+
+  4) Verify:
+       curl -s http://127.0.0.1:9222/json/version
+
+  Full guide: docs/cdp-auto-start-mac.md
+-->
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.naver.cdp.chrome</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>REPLACE_WITH_ABSOLUTE_PROJECT_ROOT/scripts/start-cdp-chrome.sh</string>
+    </array>
+
+    <!-- Run when the agent is loaded (login / launchctl load) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Do not restart forever if Chrome exits intentionally.
+         Script itself no-ops when port 9222 is already up. -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>REPLACE_WITH_ABSOLUTE_PROJECT_ROOT</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>CDP_PORT</key>
+      <string>9222</string>
+      <key>CDP_HOST</key>
+      <string>127.0.0.1</string>
+      <!-- Match project docs / .env.example default profile -->
+      <key>CDP_USER_DATA_DIR</key>
+      <string>REPLACE_WITH_HOME/chrome-cdp-profile</string>
+      <!-- Optional: set HOME explicitly if launchd env is incomplete -->
+      <!--
+      <key>HOME</key>
+      <string>REPLACE_WITH_HOME</string>
+      -->
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/com.naver.cdp.chrome.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/com.naver.cdp.chrome.err.log</string>
+  </dict>
+</plist>
