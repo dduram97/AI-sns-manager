@@ -283,6 +283,14 @@ export async function createNeighborRequestApprovalAction(
   personId: string,
 ): Promise<{ ok: boolean; approvalId?: string; errorMessage?: string }> {
   const result = await createNeighborRequestApproval(personId);
+  console.info("[NEIGHBOR_UI]", {
+    clicked_action: "create_approval",
+    person_id: personId,
+    created_jobs_count: result.ok ? 1 : 0,
+    approval_id: result.approvalId ?? null,
+    ok: result.ok,
+    error_message: result.errorMessage ?? null,
+  });
   revalidateNeighborPaths();
   return result;
 }

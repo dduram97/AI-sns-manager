@@ -2,6 +2,10 @@
 
 import type { NeighborPolicy } from "@/domain/policy/neighborPolicy";
 import type { NeighborRelationStatus } from "@/domain/neighbor/relationStatus";
+import type {
+  NeighborCollectSource,
+  NeighborScoreBreakdownLine,
+} from "@/lib/neighborCandidateDisplay";
 
 export type NeighborExclusion = {
   blog_id: string;
@@ -26,6 +30,12 @@ export type NeighborCandidate = {
   recommendReasons: string[];
   hasOpenApproval: boolean;
   alreadyRequested: boolean;
+  /** Primary search keyword used for discovery (display only). */
+  searchKeyword: string | null;
+  searchRank: number | null;
+  collectSource: NeighborCollectSource;
+  recentlyActive: boolean;
+  scoreBreakdown: NeighborScoreBreakdownLine[];
 };
 
 export type NeighborSettingsView = NeighborPolicy & {

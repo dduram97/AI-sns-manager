@@ -6,6 +6,7 @@ import {
   getNeighborManageDetailAction,
   listAcceptedNeighborManageAction,
 } from "@/app/actions/neighbors";
+import { getReplyVisitSummaryAction } from "@/app/actions/replyVisitTasks";
 import { NeighborManageDetail } from "@/components/neighbor/NeighborManageDetail";
 import { NeighborManageList } from "@/components/neighbor/NeighborManageList";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -16,6 +17,7 @@ import type {
   NeighborManageWeeklyReport,
 } from "@/types/neighborManage";
 import { emptyNeighborWeeklyReport } from "@/lib/neighborManageListUtils";
+import type { ReplyVisitSummary } from "@/services/replyVisitTaskService";
 
 const DETAIL_NOT_FOUND_MESSAGE =
   "이웃 정보를 찾을 수 없거나, 서로이웃 완료 상태가 아닙니다.";
@@ -42,6 +44,10 @@ export function NeighborManagePanel() {
   const [weeklyReport, setWeeklyReport] = useState<NeighborManageWeeklyReport>(
     () => emptyNeighborWeeklyReport(),
   );
+  const [replyVisitSummary, setReplyVisitSummary] =
+    useState<ReplyVisitSummary | null>(null);
+  const [replyVisitSummaryLoading, setReplyVisitSummaryLoading] =
+    useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detail, setDetail] = useState<NeighborManageDetailView | null>(null);
@@ -101,6 +107,31 @@ export function NeighborManagePanel() {
       })
       .finally(() => {
         if (!cancelled) setListLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setReplyVisitSummaryLoading(true);
+    void getReplyVisitSummaryAction()
+      .then((summary) => {
+        if (!cancelled) setReplyVisitSummary(summary);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setReplyVisitSummary({
+            completed: 0,
+            total: 0,
+            pending: 0,
+            lastAnalyzedAt: null,
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setReplyVisitSummaryLoading(false);
       });
     return () => {
       cancelled = true;
@@ -202,6 +233,8 @@ export function NeighborManagePanel() {
       items={items}
       todayActions={todayActions}
       weeklyReport={weeklyReport}
+      replyVisitSummary={replyVisitSummary}
+      replyVisitSummaryLoading={replyVisitSummaryLoading}
       onSelect={selectPerson}
       onListRefresh={reloadList}
     />

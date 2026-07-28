@@ -1,9 +1,13 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel./sharedon",
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "crons": [
     {
       "path": "/api/agent/tick",
       "schedule": "0 0 * * *"
+    },
+    {
+      "path": "/api/cron/relation-sync",
+      "schedule": "0 15 * * *"
     }
   ]
 }

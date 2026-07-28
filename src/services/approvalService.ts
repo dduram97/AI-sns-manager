@@ -242,9 +242,10 @@ export async function checkApprovalPostDuplicates(
 function toExecutionPort(repos: SupervisorRepos): ActionExecutionPort {
   return {
     markJobRunning: (jobId) => repos.approval.markJobRunning(jobId),
-    markJobExecuted: (jobId) => repos.approval.markJobExecuted(jobId),
-    markJobFailed: (jobId, message) =>
-      repos.approval.markJobFailed(jobId, message),
+    markJobExecuted: (jobId, opts) =>
+      repos.approval.markJobExecuted(jobId, opts),
+    markJobFailed: (jobId, message, opts) =>
+      repos.approval.markJobFailed(jobId, message, opts),
     markJobSkipped: (jobId, input) =>
       repos.approval.markJobSkipped(jobId, input),
     updateRelationship: (personId, patch) =>

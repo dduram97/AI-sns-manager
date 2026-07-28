@@ -8,7 +8,6 @@ import "server-only";
 import OpenAI from "openai";
 import {
   classifyNeighborCommentAiError,
-  isRetryableNeighborCommentAiError,
   type NeighborCommentAiErrorType,
 } from "@/lib/neighborCommentAiError";
 import {
@@ -72,19 +71,38 @@ const DEFAULT_MODEL = "gpt-4o-mini";
 const DEFAULT_TIMEOUT_MS = 20_000;
 const NEIGHBOR_DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_CHARS = 120;
-/** Natural visitor comments stay short (about 15–40 chars). */
-const NEIGHBOR_MAX_CHARS = 42;
+/** Prompt target 8–25 chars; allow emoji + punctuation in post-process. */
+const NEIGHBOR_MAX_CHARS = 32;
 const NEIGHBOR_CONTENT_MAX = 280;
 const NEIGHBOR_STYLE_EXAMPLES_MAX = 5;
-const HARD_FALLBACK = "사진 보니까 분위기가 좋네요 😊";
-const NEIGHBOR_FEED_FALLBACK = "사진 보니까 분위기가 정말 좋네요 😊";
+const RATE_LIMIT_RETRY_DELAY_MS = 2000;
+const HARD_FALLBACK = "사진 분위기 너무 좋은데욥??🤤";
+const NEIGHBOR_FEED_FALLBACK = "사진 분위기 너무 좋은데욥??🤤";
 
-const NEIGHBOR_FEED_BANNED = [
-  "글 잘 보고 갑니다",
+export const COMMENT_DRAFT_RATE_LIMIT_MESSAGE = "잠시 후 다시 시도해주세요.";
+
+const COMMENT_STYLE_EXAMPLES = [
+  "음식들 진짜 맛있어 보이네용😊",
+  "오!! 이건 처음 알았네요 감사합니다 😊",
+  "여기 저장해둬야겠어용😆",
+  "사진 분위기 너무 좋은데욥??🤤",
+  "와아.. 여기 한번 가보고 싶어요!!😊",
+  "사진 너무 예쁘네용ㅋㅎ🥹",
+  "풍경 진짜 멋져여!! 😊",
+  "우아 여기 디저트도 맛있어 보여요!!🥹",
+  "사진보고 침 줄줄 흘리는 중임댜.. 🤤",
+  "비주얼 미쳤네용ㅎㅎ🤤",
+];
+
+const COMMENT_STYLE_BANNED_PHRASES = [
+  "잘 보고 갑니다",
   "포스팅 잘 보고 갑니다",
   "좋은 정보 감사합니다",
+  "소통해요",
+  "맞팔해요",
+  "좋은 하루 보내세요",
+  "글 잘 보고 갑니다",
   "잘 봤어요",
-  "잘 보고 갑니다",
   "좋은 글 감사합니다",
   "유익한 정보",
   "유익한 글",
@@ -98,10 +116,75 @@ const NEIGHBOR_FEED_BANNED = [
 
 function mergedBanned(input: CommentDraftInput): string[] {
   const base = input.bannedPhrases ?? [];
-  if (input.variant === "neighbor_feed") {
-    return [...base, ...NEIGHBOR_FEED_BANNED];
+  return [...base, ...COMMENT_STYLE_BANNED_PHRASES];
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pickToneEndingHint(): string {
+  const r = Math.random();
+  if (r < 0.6) {
+    return "이번 댓글 말투: ~요 (예: ~네요, ~어요, ~해요)";
   }
-  return base;
+  if (r < 0.85) {
+    return "이번 댓글 말투: ~용 (예: ~네용, ~어용)";
+  }
+  if (r < 0.95) {
+    return "이번 댓글 말투: ~욥 또는 ~댜 (예: ~인데욥, ~중임댜)";
+  }
+  return "이번 댓글 말투: ㅎㅎ 또는 ㅋㅎ로 마무리";
+}
+
+function buildCommentStylePromptBlock(): string {
+  return [
+    "댓글 스타일 규칙:",
+    "- 길이 8~25자 (이모지 제외)",
+    "- 1~2문장",
+    "- 본문 내용을 반드시 하나 언급",
+    "- 마지막에는 이모지 1개만 붙이기",
+    "- 웃음은 \"ㅎㅎ\" 또는 \"ㅋㅎ\"만 사용",
+    "- \"ㅋㅋ\", \"^^\", \"~^^\" 사용 금지",
+    "",
+    "말투 다양성 (매 생성마다 하나만, alternatives는 서로 다른 말투):",
+    "- 60% → \"~요\"",
+    "- 25% → \"~용\"",
+    "- 10% → \"~욥\", \"~댜\"",
+    "- 5% → 웃음으로 마무리 (ㅎㅎ/ㅋㅎ)",
+    "",
+    "문장부호: !, ., ? 는 두개씩 — !!, .., ??",
+    "절대 같은 말투가 2~3개 연속 생성되지 않도록 랜덤화",
+    "",
+    "좋은 예:",
+    ...COMMENT_STYLE_EXAMPLES.map((e) => `- ${e}`),
+    "",
+    "금지 표현 (절대 생성 금지):",
+    ...COMMENT_STYLE_BANNED_PHRASES.map((p) => `- ${p}.`),
+    "",
+    '- JSON만 출력: {"body":"...","alternatives":["..."]}',
+    "- alternatives 0~2개, body와 다른 말투·다른 각도",
+  ].join("\n");
+}
+
+async function withRateLimitRetry(
+  attempt: () => Promise<CommentDraftResult>,
+  onRetry?: () => void,
+): Promise<CommentDraftResult> {
+  const first = await attempt();
+  if (first.source !== "fallback" || first.errorType !== "rate_limit") {
+    return first;
+  }
+  onRetry?.();
+  await sleep(RATE_LIMIT_RETRY_DELAY_MS);
+  const second = await attempt();
+  if (second.source === "fallback" && second.errorType === "rate_limit") {
+    return {
+      ...second,
+      errorMessage: COMMENT_DRAFT_RATE_LIMIT_MESSAGE,
+    };
+  }
+  return second;
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -323,54 +406,19 @@ function buildMockDraft(input: CommentDraftInput): CommentDraftResult {
 }
 
 function buildSystemPrompt(variant: CommentDraftVariant = "default"): string {
-  if (variant === "neighbor_feed") {
-    return [
-      "당신은 네이버 블로그를 방문한 일반 방문자처럼 짧은 댓글을 씁니다.",
-      "목표: 글을 읽고 남기는 자연스러운 한 마디. 광고·과한 칭찬·반복 인사 금지.",
-      "",
-      "길이: 한국어 15~40자 전후 (최대 1문장, 짧으면 좋음).",
-      "필수: 제목/요약에서 구체 소재 1개만 언급.",
-      "",
-      "스타일 가이드:",
-      "- 생활/일상: 「사진 보니까 분위기가 정말 좋네요 😊」 「저도 비슷한 경험 있는데 공감됩니다」",
-      "- 맛집: 「사진 보니 음식이 정말 먹음직스럽네요」 「다음에 한번 가보고 싶네요」",
-      "- 정보글: 「정리 잘 되어 있어서 이해하기 좋네요」 「덕분에 좋은 포인트 알아갑니다」",
-      "- 육아/반려동물: 「아이(강아지) 표정이 너무 귀엽네요」 「키우시는 정성이 느껴집니다」",
-      "",
-      "금지 (절대):",
-      "- 「좋은 정보 감사합니다」「유익한 글 잘 보고 갑니다」「글 잘 보고 갑니다」「포스팅 잘 보고 갑니다」",
-      "- 광고·홍보·팔로우 강요·링크·해시태그·과한 칭찬 나열",
-      "- 같은 문장 패턴 반복, 리뷰어/요약봇 말투",
-      "",
-      '- JSON만 출력: {"body":"...","alternatives":["..."]}',
-      "- alternatives는 0~2개, 서로 다른 소재/각도 (각각도 15~40자)",
-    ].join("\n");
-  }
-  return [
-    "당신은 네이버 블로그 이웃 댓글을 대신 쓰는 도우미입니다.",
-    "목표: 글을 읽고 순간적으로 남기는 실제 이웃 반응. 내 댓글 예시 말투 복제. 리뷰어/요약봇 금지.",
-    "규칙:",
-    "- 반드시 한국어 1~2줄(문장 최대 2개)만 출력",
-    "- 구조 우선: 1문장 감탄 + 짧은 꼬리(경험·감정·호기심). 본문 요약문 금지",
-    "- 글 내용을 다시 설명·정리·재서술하지 말 것 (무엇을 했는지/어떤 제품인지 설명형 금지)",
-    "- 리뷰어 표현 금지: 좋은 정보네요/도움됐어요/유익해요/잘 보고 갑니다/정리 감사/참고할게요 등",
-    "- 내 경험·감정·호기심 중심으로 반응할 것",
-    "- 글 소재는 딱 하나만 잡고 반응 (제품명/메뉴/장소/주제 키워드 중 1개)",
-    "- 예시의 말투·호흡·이모지·ㅋㅋ/ㄷㄷ 사용감을 우선 복제할 것",
-    "- '~네요/~습니다/~이에요' 정중 종결 남발 금지. 예시에 맞는 '~당/~용/~욥/~것 같아용' 적극 사용",
-    "- 감탄형: 오/우왕/이야/와/완전/미쳐따/ㄷㄷ/ㅎㅎ/ㅋㅋ 등",
-    "- 이모지 1~3개, 광고·추천 강요·링크·해시태그 금지",
-    "- 허위·과장 금지",
-    "",
-    "앵커(소재 1개만):",
-    "- 단순 공감만 하지 말 것. 소재 단어는 넣되, 그 소재로 ‘내 리액션’만 할 것",
-    "- 나쁜 예: 「다이어트 진짜 힘들죠🥹」(소재 없음) / 「민감 피부에 바디스크럽으로 각질 케어하셨군요」(본문 설명)",
-    "- 좋은 예: 「오 다이어트할 때 소스 진짜 포기 못하는데용🥹 맛있게 관리할 수 있다니 솔깃!」",
-    "- 맛집/여행: 감탄·침고임 유지 + 메뉴/장소 한 개만 툭 걸기",
-    "",
-    '- JSON만 출력: {"body":"...","alternatives":["..."]}',
-    "- alternatives는 0~2개, 다른 감탄 각도(각자도 소재 1개 + 순간 반응)",
-  ].join("\n");
+  const intro =
+    variant === "neighbor_feed"
+      ? [
+          "당신은 네이버 블로그 이웃 새글을 실제로 읽고 남기는 짧은 댓글을 작성합니다.",
+          "실제 사람이 글을 보고 순간적으로 반응한 댓글처럼 써주세요.",
+          "제목·요약·키워드만 보고 소재 1개를 골라 반응합니다.",
+        ]
+      : [
+          "당신은 네이버 블로그 이웃 글을 실제로 읽고 남기는 짧은 댓글을 작성합니다.",
+          "실제 사람이 글을 보고 순간적으로 반응한 댓글처럼 써주세요.",
+          "본문 요약·재설명·리뷰어 말투는 금지합니다.",
+        ];
+  return [...intro, "", buildCommentStylePromptBlock()].join("\n");
 }
 
 function buildUserPrompt(input: CommentDraftInput): string {
@@ -404,15 +452,16 @@ function buildUserPrompt(input: CommentDraftInput): string {
       `기본 톤: ${toneHint}`,
       `카테고리: ${category}`,
       `상황: ${situation}`,
+      pickToneEndingHint(),
       `금지어(절대 사용 금지): ${banned}`,
       "",
       "입력은 제목·요약·키워드·카테고리만 사용하세요. 전체 본문은 없습니다.",
       "",
       "작성 가이드:",
-      "- 제목·요약·키워드에서 구체 소재 1개를 골라 언급",
-      "- 실제 방문자가 남기는 짧은 공감 (15~40자)",
-      "- 방문 인사·리뷰어 멘트·광고·반복 패턴 금지",
-      "- 이모지 0~1개 허용",
+      "- 제목·요약·키워드에서 소재 1개를 골라 본문 내용을 반드시 언급",
+      "- 실제 사람이 남기는 짧은 순간 반응 (1~2문장, 8~25자)",
+      "- 마지막에 이모지 1개만, ㅎㅎ/ㅋㅎ만 허용 (ㅋㅋ/^^/~^^ 금지)",
+      "- 과한 칭찬·광고·리뷰어 멘트·금지 표현 금지",
       "",
       "내 댓글 스타일 참고(있으면):",
       examples,
@@ -426,23 +475,18 @@ function buildUserPrompt(input: CommentDraftInput): string {
 
   const toneHint =
     input.toneBase?.trim() ||
-    "친한 블로그 이웃, 캐주얼·감탄형, 이모지/ㅋㅋ 자연스럽게";
+    "친근한 이웃, 짧고 자연스러운 일상 말투";
   return [
     `기본 톤: ${toneHint}`,
     `상황 카테고리: ${situation}`,
+    pickToneEndingHint(),
     `금지어: ${banned}`,
     "",
-    "반응 가이드 (필수):",
-    "- 본문 요약·재설명 금지. 읽고 바로 남기는 짧은 리액션만",
-    "- 「좋은 정보/도움됐어요」류 리뷰어 멘트 금지",
-    "- 내 경험·감정·호기심 중심",
-    "- 소재 하나만 잡고 → 1문장 감탄 + 짧은 꼬리",
-    "- 예시와 비슷한 캐주얼 어미 (~당/~용 등), 광고/추천 멘트 금지",
-    "",
-    "앵커 가이드:",
-    "- 제목·본문에서 소재 1개만 고르기 (제품/메뉴/장소/주제)",
-    "- 정보·다이어트·제품추천·생활정보도 소재는 넣되 설명하지 말고 솔깃/공감/궁금으로 반응",
-    "- 맛집/여행은 감탄형 유지 + 메뉴·장소 한 단어만",
+    "작성 가이드:",
+    "- 본문에서 소재 1개를 골라 내용을 반드시 언급 (요약·재설명 금지)",
+    "- 실제 사람의 짧은 순간 반응 (1~2문장, 8~25자)",
+    "- 마지막에 이모지 1개만, ㅎㅎ/ㅋㅎ만 허용",
+    "- 예시 말투 참고, 리뷰어/GPT/금지 표현 금지",
     "",
     "내 댓글 예시:",
     examples,
@@ -569,7 +613,7 @@ async function generateNeighborViaOpenAi(
       const completion = await client!.chat.completions.create(
         {
           model,
-          temperature: 0.7,
+          temperature: 0.85,
           max_completion_tokens: 160,
           response_format: { type: "json_object" },
           messages: [
@@ -695,20 +739,20 @@ async function generateNeighborViaOpenAi(
     }
   }
 
-  let result = await once(1);
-  if (
-    result.source === "fallback" &&
-    result.errorType &&
-    isRetryableNeighborCommentAiError(result.errorType)
-  ) {
-    logNeighborCommentAi("retry", {
-      title,
-      blog_id: blogId,
-      errorType: result.errorType,
-    });
-    result = await once(2);
-  }
-  return result;
+  let attempt = 0;
+  return withRateLimitRetry(
+    () => {
+      attempt += 1;
+      return once(attempt);
+    },
+    () => {
+      logNeighborCommentAi("rate_limit retry", {
+        title,
+        blog_id: blogId,
+        delayMs: RATE_LIMIT_RETRY_DELAY_MS,
+      });
+    },
+  );
 }
 
 async function generateViaOpenAi(
@@ -733,71 +777,82 @@ async function generateViaOpenAi(
     };
   }
 
-  try {
-    const completion = await client.chat.completions.create({
-      model,
-      temperature: 0.7,
-      max_completion_tokens: 220,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: buildSystemPrompt(variant) },
-        {
-          role: "user",
-          content: buildUserPrompt({ ...input, bannedPhrases: banned }),
-        },
-      ],
-    });
+  const ai = client;
 
-    const raw = completion.choices[0]?.message?.content ?? "";
-    const parsed = parseLlmJson(raw);
-    if (!parsed) {
+  let attempt = 0;
+
+  async function runAttempt(): Promise<CommentDraftResult> {
+    attempt += 1;
+    try {
+      const completion = await ai.chat.completions.create({
+        model,
+        temperature: 0.85,
+        max_completion_tokens: 220,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: buildSystemPrompt(variant) },
+          {
+            role: "user",
+            content: buildUserPrompt({ ...input, bannedPhrases: banned }),
+          },
+        ],
+      });
+
+      const raw = completion.choices[0]?.message?.content ?? "";
+      const parsed = parseLlmJson(raw);
+      if (!parsed) {
+        return {
+          ...buildStyleAwareFallback(input),
+          source: "fallback",
+          model,
+          errorMessage: "empty_or_unparseable_llm_response",
+          situation: input.situation,
+        };
+      }
+
+      const body = normalizeCommentDraft(parsed.body, {
+        bannedPhrases: banned,
+      });
+      if (!body) {
+        return {
+          ...buildStyleAwareFallback(input),
+          source: "fallback",
+          model,
+          errorMessage: "normalized_body_empty",
+          situation: input.situation,
+        };
+      }
+
+      const alternatives = parsed.alternatives
+        .map((a) =>
+          normalizeCommentDraft(a, {
+            bannedPhrases: banned,
+          }),
+        )
+        .filter((a) => a && a !== body)
+        .slice(0, 2);
+
+      return {
+        body,
+        alternatives,
+        source: "llm",
+        model,
+        situation: input.situation,
+      };
+    } catch (err) {
+      const classified = classifyNeighborCommentAiError(err);
       return {
         ...buildStyleAwareFallback(input),
         source: "fallback",
         model,
-        errorMessage: "empty_or_unparseable_llm_response",
+        errorMessage: classified.raw,
+        errorType: classified.errorType,
         situation: input.situation,
       };
     }
-
-    const body = normalizeCommentDraft(parsed.body, {
-      bannedPhrases: banned,
-    });
-    if (!body) {
-      return {
-        ...buildStyleAwareFallback(input),
-        source: "fallback",
-        model,
-        errorMessage: "normalized_body_empty",
-        situation: input.situation,
-      };
-    }
-
-    const alternatives = parsed.alternatives
-      .map((a) =>
-        normalizeCommentDraft(a, {
-          bannedPhrases: banned,
-        }),
-      )
-      .filter((a) => a && a !== body)
-      .slice(0, 2);
-
-    return {
-      body,
-      alternatives,
-      source: "llm",
-      model,
-      situation: input.situation,
-    };
-  } catch (err) {
-    return {
-      ...buildStyleAwareFallback(input),
-      source: "fallback",
-      model,
-      errorMessage: err instanceof Error ? err.message : String(err),
-      situation: input.situation,
-    };
   }
+
+  return withRateLimitRetry(runAttempt);
 }
 
 /**

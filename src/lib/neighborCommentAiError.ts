@@ -38,7 +38,7 @@ export function neighborCommentAiUserMessage(
     case "auth":
       return "AI 인증 오류";
     case "rate_limit":
-      return "AI 요청 제한 발생";
+      return "잠시 후 다시 시도해주세요.";
     case "timeout":
       return "AI 응답 시간이 초과되었습니다.";
     case "server":

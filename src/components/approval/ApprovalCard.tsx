@@ -188,6 +188,16 @@ export function ApprovalCard({
   const isComment = item.job.action_type === "comment";
   const isFailed =
     !item.approval.resolved_at && item.job.status === "failed";
+  const ref = item.job.target_ref;
+  const neighborPostUrl =
+    typeof ref?.post_url === "string" && ref.post_url.trim()
+      ? ref.post_url.trim()
+      : typeof ref?.blog_id === "string" &&
+          typeof ref?.log_no === "string" &&
+          ref.blog_id.trim() &&
+          /^\d+$/.test(String(ref.log_no).trim())
+        ? `https://blog.naver.com/${ref.blog_id.trim()}/${String(ref.log_no).trim()}`
+        : null;
 
   return (
     <article
@@ -223,7 +233,18 @@ export function ApprovalCard({
                   {authorName}
                 </p>
                 <h2 className="mt-0.5 text-base font-semibold tracking-tight leading-snug">
-                  {postTitle}
+                  {neighborPostUrl ? (
+                    <a
+                      href={neighborPostUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline-offset-2 hover:underline"
+                    >
+                      {postTitle}
+                    </a>
+                  ) : (
+                    postTitle
+                  )}
                 </h2>
                 {publishedLabel ? (
                   <p className="mt-0.5 text-xs text-muted-foreground">
@@ -320,7 +341,7 @@ export function ApprovalCard({
           {(neighborAiError || previewError) ? (
             <div className="space-y-0.5">
               <p className="text-xs text-destructive">
-                원인: {neighborAiError || previewError}
+                {neighborAiError || previewError}
               </p>
             </div>
           ) : null}
@@ -472,18 +493,27 @@ export function ApprovalCard({
             disabled={busy}
             onClick={() =>
               run(async () => {
-                const result = await regenerateApprovalCommentDraftAction(
-                  item.approval.id,
-                  situation,
-                );
-                setDraft(result.body);
-                setSituation(result.situation);
-                setRegenHint(
-                  developerMode
-                    ? `초안 재생성 · ${result.source}`
-                    : "초안을 다시 만들었습니다",
-                );
-                setEditing(true);
+                setRegenHint(null);
+                try {
+                  const result = await regenerateApprovalCommentDraftAction(
+                    item.approval.id,
+                    situation,
+                  );
+                  setDraft(result.body);
+                  setSituation(result.situation);
+                  setRegenHint(
+                    developerMode
+                      ? `초안 재생성 · ${result.source}`
+                      : "초안을 다시 만들었습니다",
+                  );
+                  setEditing(true);
+                } catch (err) {
+                  const msg =
+                    err instanceof Error && err.message.trim()
+                      ? err.message
+                      : "잠시 후 다시 시도해주세요.";
+                  setRegenHint(msg);
+                }
               })
             }
           >

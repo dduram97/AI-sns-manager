@@ -13,11 +13,19 @@ import {
 import type { Repositories } from "../repositories/index";
 import type {
   ActionJob,
+  ActionRisk,
+  ActionType,
   ApprovalItem,
   DecisionOutput,
   DecisionRecord,
   Workflow,
 } from "./types";
+
+/** Matches action_jobs_risk_matrix: visit/like → low, comment/request/reply → high. */
+function riskForActionType(actionType: ActionType | string): ActionRisk {
+  if (actionType === "like" || actionType === "visit") return "low";
+  return "high";
+}
 
 async function buildMutualRequestContext(
   repos: Repositories,
@@ -158,12 +166,13 @@ export async function enqueueApproval(
     };
   }
 
+  const primaryRisk = riskForActionType(output.draft.action_type);
   const job = await repos.createActionJob({
     parent_workflow_id: workflow.id,
     person_id: workflow.person_id,
     channel: output.draft.channel,
     action_type: output.draft.action_type,
-    risk: "high",
+    risk: primaryRisk,
     status: "pending_approval",
     draft_body,
     draft_alternatives,
@@ -179,7 +188,7 @@ export async function enqueueApproval(
       person_id: workflow.person_id,
       channel: output.draft.channel,
       action_type: "like",
-      risk: "low",
+      risk: riskForActionType("like"),
       status: "planned",
       target_ref: {
         ...target_ref,
@@ -192,6 +201,7 @@ export async function enqueueApproval(
     });
   }
 
+  const isLikeOnly = output.draft.action_type === "like";
   const presented_context =
     output.draft.action_type === "neighbor_request"
       ? await buildMutualRequestContext(repos, workflow, output)
@@ -210,7 +220,9 @@ export async function enqueueApproval(
                 bundle_id,
                 available_modes: ["comment", "like", "both"],
               }
-            : {}),
+            : isLikeOnly
+              ? { available_modes: ["like"] }
+              : {}),
         };
 
   const approval = await repos.createApproval({

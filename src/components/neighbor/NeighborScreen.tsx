@@ -128,6 +128,7 @@ function pageNumbers(current: number, total: number): Array<number | "…"> {
 
 type Flow =
   | null
+  | { phase: "checking"; ids: string[]; eta: string }
   | { phase: "confirm"; ids: string[]; eta: string }
   | {
       phase: "duplicate";
@@ -208,6 +209,9 @@ export function NeighborScreen({
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectedExclusionIds, setSelectedExclusionIds] = useState<Set<string>>(
+    new Set(),
+  );
   const [pending, start] = useTransition();
   const [message, setMessage] = useState<string | null>(null);
   const [failReasons, setFailReasons] = useState<Record<string, string>>({});
@@ -309,10 +313,42 @@ export function NeighborScreen({
     }
   }, [selectState]);
 
+  const exclusionSelectState = useMemo(() => {
+    if (exclusions.length === 0) return "none" as const;
+    const selectedCount = exclusions.filter((e) =>
+      selectedExclusionIds.has(e.blog_id),
+    ).length;
+    if (selectedCount === 0) return "none" as const;
+    if (selectedCount === exclusions.length) return "all" as const;
+    return "partial" as const;
+  }, [exclusions, selectedExclusionIds]);
+
+  const exclusionSelectAllRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    if (!lazyTabs || exclusionsLoaded || tab !== "excluded") return;
+    if (exclusionSelectAllRef.current) {
+      exclusionSelectAllRef.current.indeterminate =
+        exclusionSelectState === "partial";
+    }
+  }, [exclusionSelectState]);
+
+  useEffect(() => {
+    setSelectedExclusionIds((prev) => {
+      const valid = new Set(exclusions.map((e) => e.blog_id));
+      const next = new Set([...prev].filter((id) => valid.has(id)));
+      if (
+        next.size === prev.size &&
+        [...next].every((id) => prev.has(id))
+      ) {
+        return prev;
+      }
+      return next;
+    });
+  }, [exclusions]);
+
+  useEffect(() => {
+    if (!lazyTabs || exclusionsLoaded) return;
     let cancelled = false;
-    setSecondaryLoading(true);
+    if (tab === "excluded") setSecondaryLoading(true);
     void listNeighborExclusionsAction()
       .then((rows) => {
         if (!cancelled) setExclusions(rows);
@@ -380,8 +416,61 @@ export function NeighborScreen({
     });
   }
 
-  function goToCompletedTab() {
+  function goToCompletedTab(
+    statusFilter?: NeighborCompletedStatusFilter | null,
+  ) {
     setTab("completed");
+    const applied = statusFilter ?? null;
+    setCompletedStatusFilter(applied);
+    setCompletedLoading(true);
+    void listNeighborCompletedAction(1, PAGE_SIZE, {
+      preset: completedPreset,
+      fromDate: completedPreset === "custom" ? customFrom : undefined,
+      toDate: completedPreset === "custom" ? customTo : undefined,
+      statusFilter: applied,
+    })
+      .then(setCompleted)
+      .finally(() => setCompletedLoading(false));
+  }
+
+  function goToExcludedTab() {
+    setTab("excluded");
+  }
+
+  async function restoreExcludedBlogs(blogIds: string[]) {
+    if (blogIds.length === 0) return;
+    for (const blogId of blogIds) {
+      await allowNeighborBlogAgainAction(blogId);
+    }
+    setExclusions((prev) => prev.filter((x) => !blogIds.includes(x.blog_id)));
+    setSelectedExclusionIds((prev) => {
+      const next = new Set(prev);
+      for (const id of blogIds) next.delete(id);
+      return next;
+    });
+    const [freshCandidates, freshScreen] = await Promise.all([
+      listNeighborCandidatesAction(),
+      getNeighborScreenAction(),
+    ]);
+    setCandidates(freshCandidates);
+    setSettings(freshScreen.settings);
+  }
+
+  function toggleExclusionSelectAll() {
+    if (exclusionSelectState === "all") {
+      setSelectedExclusionIds(new Set());
+      return;
+    }
+    setSelectedExclusionIds(new Set(exclusions.map((e) => e.blog_id)));
+  }
+
+  function toggleExclusionSelection(blogId: string, on: boolean) {
+    setSelectedExclusionIds((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(blogId);
+      else next.delete(blogId);
+      return next;
+    });
   }
 
   async function maybeAutoCheckNeighborStatus() {
@@ -479,57 +568,90 @@ export function NeighborScreen({
     };
   }, []);
 
-  async function requestBatch(personIds: string[]) {
+  async function requestBatch(personIds: string[], clickedAction: string) {
     if (personIds.length === 0) return;
+
+    console.info("[NEIGHBOR_UI]", {
+      selected_count: personIds.length,
+      selected_job_ids: personIds,
+      clicked_action: clickedAction,
+    });
+
     if (settings.today_remaining <= 0) {
       setMessage("오늘 서로이웃 추가 가능 수량을 모두 사용했습니다.");
       return;
     }
     const capped = personIds.slice(0, settings.today_remaining);
-    const check = await checkNeighborDuplicatesAction(capped);
-    if (check.duplicates.length > 0) {
+    const eta = formatEta(capped.length, delayMin, delayMax);
+
+    setFlow({ phase: "checking", ids: capped, eta });
+
+    try {
+      const check = await checkNeighborDuplicatesAction(capped);
+      if (check.duplicates.length > 0) {
+        setFlow({
+          phase: "duplicate",
+          ids: capped,
+          duplicates: check.duplicates.map((d) => ({
+            personId: d.personId,
+            blogName: d.blogName,
+            blogId: d.blogId,
+          })),
+        });
+        return;
+      }
+      if (capped.length === 1) {
+        await runBatch(capped);
+        return;
+      }
       setFlow({
-        phase: "duplicate",
+        phase: "confirm",
         ids: capped,
-        duplicates: check.duplicates.map((d) => ({
-          personId: d.personId,
-          blogName: d.blogName,
-          blogId: d.blogId,
-        })),
+        eta,
       });
-      return;
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "서로이웃 신청을 시작하지 못했습니다.";
+      console.error("[NEIGHBOR_UI] request_failed", msg);
+      setFlow(null);
+      setMessage(msg);
     }
-    setFlow({
-      phase: "confirm",
-      ids: capped,
-      eta: formatEta(capped.length, delayMin, delayMax),
-    });
   }
 
   async function runBatch(personIds: string[]) {
+    if (personIds.length === 0) return;
+
     if (autoCloseRef.current) {
       clearTimeout(autoCloseRef.current);
       autoCloseRef.current = null;
     }
 
-    setFlow({
-      phase: "running",
-      total: personIds.length,
-      current: 0,
-      success: 0,
-      failed: 0,
-      waiting: personIds.length,
-      title: "-",
-      statusKind: "idle",
-      nextDelaySec: null,
-    });
+    try {
+      console.info("[NEIGHBOR_UI]", {
+        clicked_action: "run_batch",
+        selected_count: personIds.length,
+        selected_job_ids: personIds,
+        created_jobs_count: personIds.length,
+      });
 
-    let success = 0;
-    let failed = 0;
-    const succeededIds: string[] = [];
-    const newFailReasons: Record<string, string> = {};
+      setFlow({
+        phase: "running",
+        total: personIds.length,
+        current: 0,
+        success: 0,
+        failed: 0,
+        waiting: personIds.length,
+        title: "-",
+        statusKind: "idle",
+        nextDelaySec: null,
+      });
 
-    for (let i = 0; i < personIds.length; i++) {
+      let success = 0;
+      let failed = 0;
+      const succeededIds: string[] = [];
+      const newFailReasons: Record<string, string> = {};
+
+      for (let i = 0; i < personIds.length; i++) {
       const personId = personIds[i]!;
       const cand = candidates.find((c) => c.personId === personId);
       const title = cand?.blogName ?? personId.slice(0, 8);
@@ -549,13 +671,18 @@ export function NeighborScreen({
       const created = await createNeighborRequestApprovalAction(personId);
       if (!created.ok || !created.approvalId) {
         failed += 1;
-        newFailReasons[personId] =
+        const errorMessage =
           created.errorMessage?.trim() ||
           "서로이웃 신청을 시작하지 못했습니다.";
-        await markNeighborRequestFailedAction(
-          personId,
-          newFailReasons[personId],
-        );
+        newFailReasons[personId] = errorMessage;
+        console.info("[NEIGHBOR_EXECUTE]", {
+          jobId: null,
+          blogId: cand?.blogId ?? null,
+          status: "create_failed",
+          errorCode: "CREATE_FAILED",
+          errorMessage,
+        });
+        await markNeighborRequestFailedAction(personId, errorMessage);
         setFlow({
           phase: "running",
           total: personIds.length,
@@ -575,6 +702,17 @@ export function NeighborScreen({
         undefined,
         undefined,
       );
+      console.info("[NEIGHBOR_EXECUTE]", {
+        jobId: created.approvalId,
+        blogId: cand?.blogId ?? null,
+        status: outcome.excluded
+          ? "excluded"
+          : outcome.ok
+            ? "executed"
+            : "failed",
+        errorCode: outcome.excluded ? "EXCLUDED" : outcome.ok ? null : "FAILED",
+        errorMessage: outcome.errorMessage ?? null,
+      });
       if (outcome.excluded) {
         const msg =
           outcome.errorMessage?.trim() || "서로이웃 신청을 건너뛰었습니다.";
@@ -698,6 +836,15 @@ export function NeighborScreen({
       setFlow(null);
       if (lastRunSuccessRef.current > 0) goToCompletedTab();
     }, 8_000);
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : "서로이웃 신청 중 오류가 발생했습니다.";
+      console.error("[NEIGHBOR_UI] run_batch_failed", msg);
+      setFlow(null);
+      setMessage(msg);
+    }
   }
 
   return (
@@ -781,9 +928,12 @@ export function NeighborScreen({
             candidateCount={candidates.length}
             todayExecuted={settings.today_executed}
             todayFailed={settings.today_failed}
-            todayExcluded={settings.today_excluded}
+            todayExcluded={exclusions.length}
             dailyLimit={settings.daily_request_limit}
             todayRemaining={settings.today_remaining}
+            onSuccessClick={() => goToCompletedTab(null)}
+            onFailedClick={() => goToCompletedTab("failed")}
+            onExcludedClick={goToExcludedTab}
           />
           <div className="flex flex-col gap-2">
             <Button
@@ -1296,7 +1446,9 @@ export function NeighborScreen({
                   excludeDisabled={pending}
                   failReason={failReasons[c.personId] ?? null}
                   onToggleSelect={(checked) => toggle(c.personId, checked)}
-                  onRequest={() => void requestBatch([c.personId])}
+                  onRequest={() =>
+                    void requestBatch([c.personId], "single_request")
+                  }
                   onExclude={() =>
                     start(async () => {
                       await excludeNeighborBlogAction({
@@ -1345,6 +1497,47 @@ export function NeighborScreen({
               ) : null}
             </>
           )}
+          {selected.size > 0 ? (
+            <div className="sticky bottom-16 z-20 rounded-xl border border-border/70 bg-background/95 p-3 shadow-sm backdrop-blur">
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                  간격
+                  <input
+                    type="number"
+                    min={0}
+                    value={delayMin}
+                    disabled={pending || Boolean(flow)}
+                    onChange={(e) => {
+                      const v = Math.max(0, Number(e.target.value) || 0);
+                      setDelayMin(v);
+                      if (delayMax < v) setDelayMax(v);
+                    }}
+                    className="w-12 rounded-md border border-input bg-background px-1.5 py-1 text-xs"
+                  />
+                  ~
+                  <input
+                    type="number"
+                    min={0}
+                    value={delayMax}
+                    disabled={pending || Boolean(flow)}
+                    onChange={(e) => {
+                      const v = Math.max(0, Number(e.target.value) || 0);
+                      setDelayMax(Math.max(delayMin, v));
+                    }}
+                    className="w-12 rounded-md border border-input bg-background px-1.5 py-1 text-xs"
+                  />
+                  초
+                </label>
+              </div>
+              <Button
+                className="mt-2.5 w-full"
+                disabled={pending || Boolean(flow)}
+                onClick={() => void requestBatch([...selected], "bulk_execute")}
+              >
+                선택 {selected.size}건 실행
+              </Button>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -1358,7 +1551,31 @@ export function NeighborScreen({
 
       {tab === "excluded" ? (
         <div className="flex flex-col gap-3">
-          <h2 className="text-sm font-medium">제외한 블로그</h2>
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-medium">제외한 블로그</h2>
+            {exclusions.length > 0 ? (
+              <button
+                type="button"
+                className="inline-flex items-center gap-2 rounded-md border border-border/70 px-2.5 py-1.5 text-xs hover:bg-secondary/60"
+                onClick={toggleExclusionSelectAll}
+                disabled={pending}
+              >
+                <input
+                  ref={exclusionSelectAllRef}
+                  type="checkbox"
+                  className="size-3.5"
+                  checked={exclusionSelectState === "all"}
+                  readOnly
+                  tabIndex={-1}
+                />
+                {exclusionSelectState === "all"
+                  ? "전체 선택됨"
+                  : exclusionSelectState === "partial"
+                    ? "부분 선택"
+                    : "전체 선택"}
+              </button>
+            ) : null}
+          </div>
           {secondaryLoading ? (
             <div className="flex flex-col gap-2">
               {Array.from({ length: 3 }).map((_, i) => (
@@ -1368,35 +1585,55 @@ export function NeighborScreen({
           ) : exclusions.length === 0 ? (
             <p className="text-sm text-muted-foreground">제외 목록이 비어 있습니다.</p>
           ) : (
-            exclusions.map((e) => (
-              <div
-                key={e.blog_id}
-                className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-card p-3"
-              >
-                <div className="min-w-0">
-                  <p className="text-sm font-medium">
-                    {e.blog_name ?? e.blog_id}
-                  </p>
-                  <p className="text-xs text-muted-foreground">{e.blog_id}</p>
+            <>
+              {exclusions.map((e) => (
+                <div
+                  key={e.blog_id}
+                  className="flex items-center gap-3 rounded-xl border border-border/70 bg-card p-3"
+                >
+                  <input
+                    type="checkbox"
+                    className="size-4 shrink-0"
+                    checked={selectedExclusionIds.has(e.blog_id)}
+                    disabled={pending}
+                    onChange={(ev) =>
+                      toggleExclusionSelection(e.blog_id, ev.target.checked)
+                    }
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">
+                      {e.blog_name ?? e.blog_id}
+                    </p>
+                    <p className="text-xs text-muted-foreground">{e.blog_id}</p>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={pending}
+                    onClick={() =>
+                      start(async () => {
+                        await restoreExcludedBlogs([e.blog_id]);
+                      })
+                    }
+                  >
+                    제외 취소
+                  </Button>
                 </div>
+              ))}
+              {selectedExclusionIds.size > 0 ? (
                 <Button
-                  variant="secondary"
-                  size="sm"
+                  className="w-full"
                   disabled={pending}
                   onClick={() =>
                     start(async () => {
-                      await allowNeighborBlogAgainAction(e.blog_id);
-                      setExclusions((prev) =>
-                        prev.filter((x) => x.blog_id !== e.blog_id),
-                      );
-                      router.refresh();
+                      await restoreExcludedBlogs([...selectedExclusionIds]);
                     })
                   }
                 >
-                  다시 추천 허용
+                  선택 {selectedExclusionIds.size}건 제외 취소
                 </Button>
-              </div>
-            ))
+              ) : null}
+            </>
           )}
         </div>
       ) : null}
@@ -1761,24 +1998,6 @@ export function NeighborScreen({
               className="w-20 rounded-md border border-input px-2 py-1 text-sm"
             />
           </label>
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="text-xs text-muted-foreground">실행 간격(초)</span>
-            <input
-              type="number"
-              min={0}
-              value={delayMin}
-              onChange={(e) => setDelayMin(Number(e.target.value) || 0)}
-              className="w-16 rounded-md border border-input px-2 py-1 text-sm"
-            />
-            <span>~</span>
-            <input
-              type="number"
-              min={0}
-              value={delayMax}
-              onChange={(e) => setDelayMax(Number(e.target.value) || 0)}
-              className="w-16 rounded-md border border-input px-2 py-1 text-sm"
-            />
-          </div>
           <label className="space-y-1 text-sm">
             <span className="text-xs text-muted-foreground">
               서로이웃 상태 확인 주기
@@ -1967,25 +2186,13 @@ export function NeighborScreen({
         </div>
       ) : null}
 
-      {tab === "candidates" && selected.size > 0 ? (
-        <div className="fixed inset-x-0 bottom-16 z-20 border-t border-border/70 bg-background/95 px-4 py-3 backdrop-blur">
-          <div className="mx-auto w-full max-w-lg">
-            <Button
-              className="w-full"
-              disabled={pending || Boolean(flow)}
-              onClick={() => void requestBatch([...selected])}
-            >
-              선택 실행 ({selected.size})
-            </Button>
-          </div>
-        </div>
-      ) : null}
-
       {flow ? (
         <AppModal
           open
           title={
-            flow.phase === "confirm"
+            flow.phase === "checking"
+              ? "서로이웃 신청을 진행하고 있습니다"
+              : flow.phase === "confirm"
               ? "실행 확인"
               : flow.phase === "duplicate"
                 ? "이미 서로이웃 처리한 블로그"
@@ -1994,16 +2201,29 @@ export function NeighborScreen({
                   : "서로이웃 신청 완료"
           }
           onClose={() => {
-            if (flow.phase === "running") return;
+            if (flow.phase === "running" || flow.phase === "checking") return;
             if (autoCloseRef.current) {
               clearTimeout(autoCloseRef.current);
               autoCloseRef.current = null;
             }
             setFlow(null);
           }}
-          showCloseButton={flow.phase !== "running"}
+          showCloseButton={
+            flow.phase !== "running" && flow.phase !== "checking"
+          }
           footer={null}
         >
+            {flow.phase === "checking" ? (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  중복 여부를 확인하고 있습니다…
+                </p>
+                <p className="mt-2 text-sm">
+                  대상 {flow.ids.length}건 · 예상 소요 {flow.eta}
+                </p>
+              </>
+            ) : null}
+
             {flow.phase === "confirm" ? (
               <>
                 <p className="text-sm">
@@ -2157,6 +2377,19 @@ export function NeighborScreen({
                     <dd>{flow.failed}건</dd>
                   </div>
                 </dl>
+                <p className="mt-3 text-sm font-medium">
+                  {flow.failed > 0 && flow.success === 0
+                    ? "서로이웃 신청 실패"
+                    : flow.failed > 0
+                      ? "서로이웃 신청 일부 실패"
+                      : "서로이웃 신청 완료"}
+                </p>
+                {flow.failed > 0 ? (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    실패 {flow.failed}건은 카드의 「실패 이유 보기」에서 확인할 수
+                    있습니다.
+                  </p>
+                ) : null}
                 <div className="mt-5 flex justify-end gap-2">
                   <Button
                     variant="secondary"

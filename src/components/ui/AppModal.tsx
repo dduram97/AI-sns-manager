@@ -82,8 +82,8 @@ export function AppModal({
           </button>
         </div>
         <div className="mt-3">{children}</div>
-        {footer != null ? (
-          <div className="mt-5">{footer}</div>
+        {footer !== undefined ? (
+          footer != null ? <div className="mt-5">{footer}</div> : null
         ) : showCloseButton ? (
           <div className="mt-5 flex justify-end">
             <Button type="button" size="sm" variant="secondary" onClick={onClose}>

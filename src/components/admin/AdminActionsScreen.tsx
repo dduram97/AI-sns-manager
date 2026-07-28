@@ -27,6 +27,8 @@ function statusBadgeClass(status: string): string {
       return "bg-sky-500/15 text-sky-800 dark:text-sky-200";
     case "executed":
       return "bg-emerald-500/15 text-emerald-800 dark:text-emerald-200";
+    case "partial_success":
+      return "bg-teal-500/15 text-teal-800 dark:text-teal-200";
     case "running":
       return "bg-violet-500/15 text-violet-800 dark:text-violet-200";
     case "skipped":
@@ -49,7 +51,13 @@ export function AdminActionsScreen({
     "all" | "like" | "comment" | "neighbor_request" | "visit"
   >("all");
   const [statusFilter, setStatusFilter] = useState<
-    "all" | "planned" | "approved" | "executed" | "failed"
+    | "all"
+    | "planned"
+    | "approved"
+    | "executed"
+    | "failed"
+    | "skipped"
+    | "partial_success"
   >("all");
 
   const visible = useMemo(() => {
@@ -58,6 +66,9 @@ export function AdminActionsScreen({
       if (statusFilter === "all") return true;
       if (statusFilter === "failed") {
         return r.status === "failed" || r.status === "permanently_failed";
+      }
+      if (statusFilter === "skipped") {
+        return r.status === "skipped" || r.status === "excluded";
       }
       return r.status === statusFilter;
     });
@@ -129,6 +140,8 @@ export function AdminActionsScreen({
             ["planned", "planned"],
             ["approved", "approved"],
             ["executed", "executed"],
+            ["partial_success", "partial"],
+            ["skipped", "skipped"],
             ["failed", "failed"],
           ] as const
         ).map(([key, label]) => (
@@ -208,6 +221,17 @@ export function AdminActionsScreen({
                   </p>
                 ) : null}
               </div>
+              {row.resultLabel && !row.failure ? (
+                <p
+                  className={`mt-2 rounded-md px-2.5 py-2 text-[11px] font-medium ${
+                    row.status === "executed" || row.status === "partial_success"
+                      ? "bg-emerald-500/10 text-emerald-800 dark:text-emerald-200"
+                      : "bg-secondary/60 text-secondary-foreground"
+                  }`}
+                >
+                  {row.resultLabel}
+                </p>
+              ) : null}
               {row.failure ? (
                 <div
                   className={`mt-2 space-y-0.5 rounded-md px-2.5 py-2 text-[11px] ${

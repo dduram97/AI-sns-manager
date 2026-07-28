@@ -18,6 +18,8 @@ export type AdminActionRow = {
   approvedBy: string | null;
   error: string | null;
   workerTest: boolean;
+  /** Human-readable outcome line for executed / soft / failed */
+  resultLabel: string | null;
   failure: {
     errorCode: string;
     errorMessage: string;
@@ -105,7 +107,11 @@ function mapActionRows(
     const status = String(r.status ?? "");
     const completedAt =
       executedAt ||
-      (status === "failed" || status === "permanently_failed"
+      (status === "failed" ||
+      status === "permanently_failed" ||
+      status === "skipped" ||
+      status === "excluded" ||
+      status === "partial_success"
         ? typeof r.updated_at === "string"
           ? r.updated_at
           : null
@@ -124,6 +130,30 @@ function mapActionRows(
       status === "excluded" ||
       (parsed != null && parsed.kind !== "failure");
 
+    const execResult =
+      ref.execution_result &&
+      typeof ref.execution_result === "object" &&
+      !Array.isArray(ref.execution_result)
+        ? (ref.execution_result as Record<string, unknown>)
+        : null;
+
+    let resultLabel: string | null = null;
+    if (status === "executed") {
+      const already =
+        execResult?.already_liked === true ||
+        (typeof execResult?.reason_message === "string" &&
+          /already_liked/i.test(execResult.reason_message));
+      resultLabel = already ? "처리완료 · 이미 공감됨" : "처리완료";
+    } else if (status === "partial_success") {
+      resultLabel = "부분 성공";
+    } else if (parsed) {
+      resultLabel = parsed.summary;
+    } else if (status === "running") {
+      resultLabel = "실행 중";
+    } else if (status === "planned" || status === "approved") {
+      resultLabel = "대기";
+    }
+
     return {
       id: String(r.id),
       actionType: String(r.action_type ?? ""),
@@ -137,6 +167,7 @@ function mapActionRows(
       approvedBy: typeof r.approved_by === "string" ? r.approved_by : null,
       error,
       workerTest: ref.worker_test === true,
+      resultLabel,
       failure:
         (isFailed || isSoft) && parsed
           ? {

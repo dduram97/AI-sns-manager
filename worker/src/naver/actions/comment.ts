@@ -46,6 +46,14 @@ function failComment(
   };
 }
 
+function commentDebug(
+  jobId: string,
+  fields: Record<string, unknown>,
+): void {
+  if (process.env.COMMENT_DEBUG !== "1") return;
+  console.info("[COMMENT_DEBUG]", { job_id: jobId, ...fields });
+}
+
 const COMMENT_INPUT_SELECTORS = [
   "#naverComment__write_textarea",
   "#naverCommentwrite_textarea",
@@ -128,20 +136,90 @@ function resolveCommentPageUrl(targetRef: LikeTargetRef): string | null {
   let logNo = strRef(ref, "log_no", "logNo", "post_id", "postId");
 
   if (postUrl) {
-    const m = postUrl.match(/blog\.naver\.com\/([^/?#]+)\/(\d+)/i);
+    const m =
+      postUrl.match(/blog\.naver\.com\/([^/?#]+)\/(\d+)/i) ||
+      postUrl.match(/[?&]blogId=([^&]+).*?[?&]logNo=(\d+)/i);
     if (m) {
       blogId = blogId ?? decodeURIComponent(m[1]!);
       logNo = logNo ?? m[2]!;
     }
   }
 
+  // Prefer PostView + modal=comment — CommentList often redirects and drops the composer.
   if (blogId && logNo) {
-    return `https://m.blog.naver.com/CommentList.naver?blogId=${encodeURIComponent(blogId)}&logNo=${encodeURIComponent(logNo)}`;
+    return `https://m.blog.naver.com/PostView.naver?blogId=${encodeURIComponent(blogId)}&logNo=${encodeURIComponent(logNo)}&modal=comment`;
   }
-  return postUrl;
+  if (postUrl.includes("modal=")) return postUrl;
+  const joiner = postUrl.includes("?") ? "&" : "?";
+  return `${postUrl}${joiner}modal=comment`;
 }
 
-async function focusAndFillComment(page: Page, body: string): Promise<void> {
+async function findCommentInputSelector(page: Page): Promise<string | null> {
+  for (const sel of COMMENT_INPUT_SELECTORS) {
+    const loc = page.locator(sel).first();
+    const count = await loc.count().catch(() => 0);
+    if (count > 0) return sel;
+  }
+  return null;
+}
+
+/** Open mobile comment sheet if composer is not yet in DOM. */
+async function ensureCommentComposerOpen(page: Page): Promise<void> {
+  if (await findCommentInputSelector(page)) return;
+
+  const openers = [
+    'a:has-text("댓글")',
+    'button:has-text("댓글")',
+    '[class*="comment"]',
+    ".u_cbox_btn_write",
+    'a[href*="modal=comment"]',
+  ];
+  for (const sel of openers) {
+    const loc = page.locator(sel).first();
+    if ((await loc.count().catch(() => 0)) <= 0) continue;
+    const visible = await loc.isVisible().catch(() => false);
+    if (!visible) continue;
+    await loc.click({ timeout: 3_000, force: true }).catch(() => undefined);
+    await sleep(800);
+    if (await findCommentInputSelector(page)) return;
+  }
+
+  // Soft navigate with modal param if still missing
+  const u = page.url();
+  if (!/[?&]modal=comment/i.test(u)) {
+    const next = u.includes("?") ? `${u}&modal=comment` : `${u}?modal=comment`;
+    await page.goto(next, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(
+      () => undefined,
+    );
+    await sleep(1_200);
+  }
+}
+
+async function waitForCommentInput(
+  page: Page,
+  timeoutMs = 12_000,
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await ensureCommentComposerOpen(page);
+    const sel = await findCommentInputSelector(page);
+    if (sel) return sel;
+    await sleep(400);
+  }
+  return null;
+}
+
+type FillResult = {
+  ok: boolean;
+  selector: string | null;
+  typedLength: number;
+  error?: string;
+};
+
+async function focusAndFillComment(
+  page: Page,
+  body: string,
+): Promise<FillResult> {
   console.info("[worker] comment step=hide_guide");
   await page.evaluate(() => {
     const guides = document.querySelectorAll(
@@ -167,7 +245,17 @@ async function focusAndFillComment(page: Page, body: string): Promise<void> {
   }
 
   console.info("[worker] comment step=find_input");
-  const area = page.locator(COMMENT_INPUT_SELECTORS.join(", ")).first();
+  const matchedSelector = await waitForCommentInput(page, 12_000);
+  if (!matchedSelector) {
+    return {
+      ok: false,
+      selector: null,
+      typedLength: 0,
+      error: "COMMENT_INPUT_NOT_FOUND",
+    };
+  }
+
+  const area = page.locator(matchedSelector).first();
   await area.waitFor({ state: "attached", timeout: 15_000 });
   await area.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => undefined);
 
@@ -230,11 +318,23 @@ async function focusAndFillComment(page: Page, body: string): Promise<void> {
     `[worker] comment step=fill_done length=${typed.length} preview=${typed.slice(0, 40)}`,
   );
   if (!typed || typed.length < Math.min(2, body.length)) {
-    throw new Error("comment input fill did not stick");
+    return {
+      ok: false,
+      selector: matchedSelector,
+      typedLength: typed.length,
+      error: "COMMENT_FILL_FAILED",
+    };
   }
+  return {
+    ok: true,
+    selector: matchedSelector,
+    typedLength: typed.length,
+  };
 }
 
-async function clickSubmit(page: Page): Promise<boolean> {
+async function clickSubmit(
+  page: Page,
+): Promise<{ ok: boolean; selector: string | null }> {
   for (const sel of COMMENT_SUBMIT_SELECTORS) {
     const loc = page.locator(sel).first();
     const count = await loc.count().catch(() => 0);
@@ -243,8 +343,12 @@ async function clickSubmit(page: Page): Promise<boolean> {
     if (!visible) continue;
     console.info(`[worker] comment submit selector=${sel}`);
     await loc.scrollIntoViewIfNeeded({ timeout: 3_000 }).catch(() => undefined);
-    await loc.click({ timeout: 8_000, noWaitAfter: true, force: true });
-    return true;
+    try {
+      await loc.click({ timeout: 8_000, noWaitAfter: true, force: true });
+      return { ok: true, selector: sel };
+    } catch {
+      // try next
+    }
   }
 
   // discover fallback
@@ -264,24 +368,34 @@ async function clickSubmit(page: Page): Promise<boolean> {
   });
   if (clicked) {
     console.info(`[worker] comment submit discover=${clicked}`);
-    return true;
+    return { ok: true, selector: `discover:${clicked}` };
   }
-  return false;
+  return { ok: false, selector: null };
 }
 
 async function verifyCommentSubmitted(
   page: Page,
   body: string,
-): Promise<boolean> {
-  // Prefer seeing our text appear in the comment list, or upload button disabled briefly.
+): Promise<{ ok: boolean; detail: string }> {
   const snippet = body.slice(0, 24);
   const found = await page
     .locator(`text=${snippet}`)
     .first()
-    .waitFor({ state: "visible", timeout: 4_000 })
+    .waitFor({ state: "visible", timeout: 6_000 })
     .then(() => true)
     .catch(() => false);
-  if (found) return true;
+  if (found) return { ok: true, detail: "comment_text_visible" };
+
+  const listHit = await page.evaluate(`(() => {
+    var snip = ${JSON.stringify(snippet)};
+    var nodes = document.querySelectorAll('.u_cbox_contents, .u_cbox_text_wrap, .u_cbox_list, [class*="cbox"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var t = ((nodes[i].innerText || nodes[i].textContent || '') + '');
+      if (t.indexOf(snip) >= 0) return true;
+    }
+    return false;
+  })()`);
+  if (listHit) return { ok: true, detail: "comment_in_list_dom" };
 
   const busy = await page
     .locator(
@@ -289,7 +403,9 @@ async function verifyCommentSubmitted(
     )
     .count()
     .catch(() => 0);
-  return busy > 0;
+  if (busy > 0) return { ok: false, detail: "submit_busy_no_echo" };
+
+  return { ok: false, detail: "comment_not_found_after_submit" };
 }
 
 async function runCommentOnPage(
@@ -304,6 +420,7 @@ async function runCommentOnPage(
   page.setDefaultTimeout(Math.min(12_000, navMs));
   page.setDefaultNavigationTimeout(navMs);
 
+  commentDebug(jobId, { url: pageUrl, phase: "start", body_len: body.length });
   console.info(
     `[worker] comment step=goto_begin job=${jobId} url=${pageUrl} timeoutMs=${navMs}`,
   );
@@ -318,6 +435,7 @@ async function runCommentOnPage(
       `[worker] comment step=goto_failed job=${jobId} error=${message}`,
     );
     steps.push("goto");
+    commentDebug(jobId, { page_loaded: false, error: message });
     return failComment(jobId, {
       error_code: "GOTO_FAILED",
       error_message: `페이지 이동 실패: ${message}`,
@@ -331,20 +449,53 @@ async function runCommentOnPage(
     `[worker] comment step=goto_done job=${jobId} url=${page.url()}`,
   );
 
-  await sleep(600);
+  await sleep(1_500);
   const title = await page.title().catch(() => "");
   console.info(
     `[worker] comment page loaded job=${jobId} title=${title}`,
   );
+  commentDebug(jobId, {
+    url: pageUrl,
+    page_loaded: true,
+    page_url: page.url(),
+    title,
+  });
 
+  // Re-assert modal=comment if Naver stripped it on redirect
+  if (!/[?&]modal=comment/i.test(page.url()) && /PostView|blog\.naver\.com/i.test(page.url())) {
+    const next = page.url().includes("?")
+      ? `${page.url()}&modal=comment`
+      : `${page.url()}?modal=comment`;
+    await page.goto(next, { waitUntil: "domcontentloaded", timeout: navMs }).catch(
+      () => undefined,
+    );
+    await sleep(1_200);
+    commentDebug(jobId, { page_url_after_modal: page.url() });
+  }
+
+  if (/nid\.naver\.com|nidlogin\.login/i.test(page.url())) {
+    return failComment(jobId, {
+      error_code: "LOGIN_REQUIRED",
+      error_message: "네이버 로그인이 필요합니다",
+      failed_step: "post_loaded",
+      steps,
+      detail: { url: pageUrl, current_url: page.url() },
+    });
+  }
+
+  steps.push("comment_input_search");
+  let fill: FillResult;
   try {
-    steps.push("comment_input_search");
-    await focusAndFillComment(page, body);
+    fill = await focusAndFillComment(page, body);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(
       `[worker] comment step=input_failed job=${jobId} error=${message}`,
     );
+    commentDebug(jobId, {
+      comment_area_found: false,
+      input_fill_result: `error:${message}`,
+    });
     return failComment(jobId, {
       error_code: "COMMENT_INPUT_NOT_FOUND",
       error_message: `댓글 입력 실패: ${message}`,
@@ -358,47 +509,87 @@ async function runCommentOnPage(
     });
   }
 
+  commentDebug(jobId, {
+    comment_area_found: Boolean(fill.selector),
+    input_selector: fill.selector,
+    input_fill_result: fill.ok ? `ok len=${fill.typedLength}` : fill.error,
+  });
+
+  if (!fill.ok) {
+    const code =
+      fill.error === "COMMENT_FILL_FAILED"
+        ? "COMMENT_FILL_FAILED"
+        : "COMMENT_INPUT_NOT_FOUND";
+    return failComment(jobId, {
+      error_code: code,
+      error_message:
+        code === "COMMENT_FILL_FAILED"
+          ? "댓글 입력창에 내용이 반영되지 않았습니다"
+          : "댓글 입력창을 찾지 못했습니다",
+      failed_step:
+        code === "COMMENT_FILL_FAILED" ? "fill_begin" : "comment_input_search",
+      steps,
+      detail: {
+        url: pageUrl,
+        current_url: page.url(),
+        page_title: title,
+        input_selector: fill.selector,
+      },
+    });
+  }
+
   console.info(`[worker] comment step=submit_begin job=${jobId}`);
   steps.push("comment_submit");
   const submitted = await clickSubmit(page);
-  if (!submitted) {
+  commentDebug(jobId, {
+    submit_selector: submitted.selector,
+    submit_click_result: submitted.ok ? "ok" : "failed",
+  });
+  if (!submitted.ok) {
     console.error(`[worker] comment failed job=${jobId} reason=submit_missing`);
     return failComment(jobId, {
-      error_code: "COMMENT_SUBMIT_NOT_FOUND",
-      error_message: "댓글 등록 버튼을 찾지 못했습니다",
+      error_code: "COMMENT_SUBMIT_FAILED",
+      error_message: "댓글 등록 버튼을 찾지 못했거나 클릭에 실패했습니다",
       failed_step: "comment_submit",
       steps,
       detail: { url: pageUrl, current_url: page.url(), page_title: title },
     });
   }
   console.info(`[worker] comment step=submit_clicked job=${jobId}`);
-  await sleep(800);
+  await sleep(1_200);
 
   steps.push("verify");
-  const ok = await verifyCommentSubmitted(page, body);
-  if (!ok) {
-    const errText = await page
+  const verified = await verifyCommentSubmitted(page, body);
+  commentDebug(jobId, {
+    created_comment_detected: verified.ok,
+    verify_detail: verified.detail,
+  });
+  if (!verified.ok) {
+    const blocked = await page
       .locator("text=/로그인|오류|실패|작성할 수 없/")
       .first()
       .isVisible()
       .catch(() => false);
-    if (errText) {
-      console.error(`[worker] comment failed job=${jobId} reason=blocked`);
-      return failComment(jobId, {
-        error_code: "VERIFY_FAILED",
-        error_message: "댓글 등록이 차단된 것으로 보입니다 (로그인/오류 UI)",
-        failed_step: "verify",
-        steps,
-        detail: { url: pageUrl, current_url: page.url(), page_title: title },
-      });
-    }
-    console.info(
-      `[worker] comment verify soft-pass job=${jobId} (submit clicked, echo not confirmed)`,
+    console.error(
+      `[worker] comment failed job=${jobId} reason=verify detail=${verified.detail} blocked=${blocked}`,
     );
-  } else {
-    console.info(`[worker] comment verify ok job=${jobId}`);
+    return failComment(jobId, {
+      error_code: "COMMENT_VERIFY_FAILED",
+      error_message: blocked
+        ? "댓글 등록이 차단된 것으로 보입니다 (로그인/오류 UI)"
+        : `댓글 등록 후 화면에 댓글이 확인되지 않았습니다 (${verified.detail})`,
+      failed_step: "verify",
+      steps,
+      detail: {
+        url: pageUrl,
+        current_url: page.url(),
+        page_title: title,
+        verify_detail: verified.detail,
+      },
+    });
   }
 
+  console.info(`[worker] comment verify ok job=${jobId} detail=${verified.detail}`);
   console.info(`[worker] comment completed job=${jobId}`);
   return { ok: true, jobId, url: page.url() };
 }

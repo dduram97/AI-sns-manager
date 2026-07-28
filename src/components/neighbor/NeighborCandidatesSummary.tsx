@@ -5,6 +5,9 @@ type NeighborCandidatesSummaryProps = {
   todayExcluded?: number;
   dailyLimit?: number;
   todayRemaining?: number;
+  onSuccessClick?: () => void;
+  onFailedClick?: () => void;
+  onExcludedClick?: () => void;
 };
 
 function TaskProgress({
@@ -42,6 +45,44 @@ function TaskProgress({
   );
 }
 
+function StatCard({
+  label,
+  value,
+  onClick,
+}: {
+  label: string;
+  value: number;
+  onClick?: () => void;
+}) {
+  const inner = (
+    <>
+      <p className="text-[11px] font-medium text-muted-foreground">{label}</p>
+      <p className="mt-1 text-lg font-semibold tabular-nums tracking-tight">
+        {value}
+        <span className="ml-0.5 text-xs font-normal text-muted-foreground">
+          건
+        </span>
+      </p>
+    </>
+  );
+
+  if (!onClick) {
+    return (
+      <div className="rounded-lg bg-secondary/60 px-3 py-2.5">{inner}</div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-lg bg-secondary/60 px-3 py-2.5 text-left transition-colors hover:bg-secondary"
+    >
+      {inner}
+    </button>
+  );
+}
+
 export function NeighborCandidatesSummary({
   candidateCount,
   todayExecuted,
@@ -49,6 +90,9 @@ export function NeighborCandidatesSummary({
   todayExcluded = 0,
   dailyLimit,
   todayRemaining,
+  onSuccessClick,
+  onFailedClick,
+  onExcludedClick,
 }: NeighborCandidatesSummaryProps) {
   const limit = dailyLimit ?? todayExecuted + candidateCount;
   const remaining =
@@ -72,44 +116,22 @@ export function NeighborCandidatesSummary({
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <div className="rounded-lg bg-secondary/60 px-3 py-2.5">
-          <p className="text-[11px] font-medium text-muted-foreground">성공</p>
-          <p className="mt-1 text-lg font-semibold tabular-nums tracking-tight">
-            {todayExecuted}
-            <span className="ml-0.5 text-xs font-normal text-muted-foreground">
-              건
-            </span>
-          </p>
-        </div>
-        <div className="rounded-lg bg-secondary/60 px-3 py-2.5">
-          <p className="text-[11px] font-medium text-muted-foreground">실패</p>
-          <p className="mt-1 text-lg font-semibold tabular-nums tracking-tight">
-            {todayFailed}
-            <span className="ml-0.5 text-xs font-normal text-muted-foreground">
-              건
-            </span>
-          </p>
-        </div>
-        <div className="rounded-lg bg-secondary/60 px-3 py-2.5">
-          <p className="text-[11px] font-medium text-muted-foreground">제외</p>
-          <p className="mt-1 text-lg font-semibold tabular-nums tracking-tight">
-            {todayExcluded}
-            <span className="ml-0.5 text-xs font-normal text-muted-foreground">
-              건
-            </span>
-          </p>
-        </div>
-        <div className="rounded-lg bg-secondary/60 px-3 py-2.5">
-          <p className="text-[11px] font-medium text-muted-foreground">
-            남은 한도
-          </p>
-          <p className="mt-1 text-lg font-semibold tabular-nums tracking-tight">
-            {remaining}
-            <span className="ml-0.5 text-xs font-normal text-muted-foreground">
-              건
-            </span>
-          </p>
-        </div>
+        <StatCard
+          label="성공"
+          value={todayExecuted}
+          onClick={onSuccessClick}
+        />
+        <StatCard
+          label="실패"
+          value={todayFailed}
+          onClick={onFailedClick}
+        />
+        <StatCard
+          label="제외"
+          value={todayExcluded}
+          onClick={onExcludedClick}
+        />
+        <StatCard label="남은 한도" value={remaining} />
       </div>
 
       <p className="mt-2 text-[11px] text-muted-foreground">

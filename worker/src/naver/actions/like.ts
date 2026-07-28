@@ -184,6 +184,52 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function likeDebug(
+  jobId: string,
+  fields: Record<string, unknown>,
+): void {
+  if (process.env.LIKE_DEBUG !== "1") return;
+  console.info("[LIKE_DEBUG]", { job_id: jobId, ...fields });
+}
+
+/** Detect login wall / session loss on blog page. */
+async function probeLoginRequired(page: Page): Promise<boolean> {
+  const url = page.url();
+  if (/nid\.naver\.com|nidlogin\.login/i.test(url)) return true;
+  return page.evaluate(`(() => {
+    var href = location.href || '';
+    if (/nid\\.naver\\.com|nidlogin\\.login/i.test(href)) return true;
+    var body = ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ');
+    if (/로그인이 필요|로그인\\s*후\\s*이용/.test(body)) return true;
+    var loginCta = document.querySelector('a[href*="nidlogin.login"], a.link_login');
+    if (loginCta) {
+      var t = ((loginCta.innerText || loginCta.textContent || '') + '').trim();
+      if (t.indexOf('로그인') >= 0) return true;
+    }
+    return false;
+  })()`) as Promise<boolean>;
+}
+
+/** Wait briefly for Naver like/reaction network after click. */
+async function waitLikeNetwork(page: Page, timeoutMs = 4_000): Promise<{
+  seen: boolean;
+  url: string | null;
+  status: number | null;
+}> {
+  try {
+    const resp = await page.waitForResponse(
+      (r) => {
+        const u = r.url();
+        return /like|reaction|sympathy|likeit|blogserver\/like/i.test(u);
+      },
+      { timeout: timeoutMs },
+    );
+    return { seen: true, url: resp.url().slice(0, 200), status: resp.status() };
+  } catch {
+    return { seen: false, url: null, status: null };
+  }
+}
+
 function withTimeout<T>(
   promise: Promise<T>,
   ms: number,
@@ -582,6 +628,7 @@ async function runLikeOnPage(
   page.setDefaultTimeout(Math.min(10_000, navMs));
   page.setDefaultNavigationTimeout(navMs);
 
+  likeDebug(jobId, { target_url: url, phase: "start" });
   console.info(`[worker] like step=newPage_ok job=${jobId}`);
   console.info(
     `[worker] like step=goto_begin job=${jobId} timeoutMs=${navMs} waitUntil=domcontentloaded`,
@@ -598,6 +645,13 @@ async function runLikeOnPage(
       `[worker] like step=goto_failed job=${jobId} error=${message}`,
     );
     steps.push("goto");
+    likeDebug(jobId, {
+      target_url: url,
+      page_url_after_goto: page.url(),
+      click_result: "goto_failed",
+      verify_result: "n/a",
+      error: message,
+    });
     return failLike(jobId, {
       error_code: "GOTO_FAILED",
       error_message: `페이지 이동 실패: ${message}`,
@@ -622,6 +676,23 @@ async function runLikeOnPage(
     `[worker] post loaded job=${jobId} url=${page.url()} title=${title}`,
   );
 
+  const loginRequired = await probeLoginRequired(page).catch(() => false);
+  likeDebug(jobId, {
+    target_url: url,
+    page_url_after_goto: page.url(),
+    title,
+    login_status: loginRequired ? "required" : "ok",
+  });
+  if (loginRequired) {
+    return failLike(jobId, {
+      error_code: "LOGIN_REQUIRED",
+      error_message: "네이버 로그인이 필요합니다",
+      failed_step: "post_loaded",
+      steps,
+      detail: { url, current_url: page.url(), page_title: title },
+    });
+  }
+
   console.info(
     `[worker] like step=frames job=${jobId} count=${page.frames().length}`,
   );
@@ -644,10 +715,22 @@ async function runLikeOnPage(
     probe = await probeDiscoverAcrossRoots(page, jobId);
   }
 
+  likeDebug(jobId, {
+    like_button_found: probe.state !== "missing",
+    like_button_selector: probe.selector ?? probe.xpath,
+    before_like_state: probe.state,
+    source: probe.source,
+    frame: probe.frameUrl ?? "main",
+  });
+
   if (probe.state === "missing") {
     console.info(
       `[worker] like skipped job=${jobId} reason=LIKE_BUTTON_NOT_AVAILABLE`,
     );
+    likeDebug(jobId, {
+      like_button_found: false,
+      verify_result: "skipped_no_button",
+    });
     return skipLike(jobId, page.url() || url, {
       outcome: "not_available",
       reason_code: "LIKE_BUTTON_NOT_AVAILABLE",
@@ -669,6 +752,12 @@ async function runLikeOnPage(
   if (probe.state === "on") {
     console.info(`[worker] like already liked job=${jobId}`);
     console.info(`[worker] like completed job=${jobId}`);
+    likeDebug(jobId, {
+      before_like_state: "on",
+      after_like_state: "on",
+      click_result: "skipped_already_liked",
+      verify_result: "already_on",
+    });
     return { ok: true, jobId, url: page.url(), alreadyLiked: true };
   }
 
@@ -676,45 +765,79 @@ async function runLikeOnPage(
     `[worker] like step=click_begin job=${jobId} source=${probe.source}`,
   );
   steps.push("like_click");
+  const networkWait = waitLikeNetwork(page, 5_000);
   const clicked = await clickProbe(page, probe, jobId);
   if (!clicked.ok) {
+    void networkWait.catch(() => undefined);
     console.error(
       `[worker] like step=click_failed job=${jobId} error=${clicked.error}`,
     );
+    likeDebug(jobId, {
+      click_result: `failed:${clicked.error}`,
+      verify_result: "n/a",
+    });
     return failLike(jobId, {
-      error_code: "CLICK_FAILED",
+      error_code: "LIKE_CLICK_FAILED",
       error_message: `공감 클릭 실패: ${clicked.error}`,
       failed_step: "like_click",
       steps,
       detail: { url, current_url: page.url(), selector: probe.selector },
     });
   }
+  const network = await networkWait;
+  likeDebug(jobId, {
+    click_result: "ok",
+    like_network_seen: network.seen,
+    like_network_url: network.url,
+    like_network_status: network.status,
+  });
   console.info(`[worker] like clicked job=${jobId}`);
   await sleep(1_000);
 
   steps.push("verify");
   let after = await recheckState(page, probe);
   console.info(`[worker] like step=verify1 job=${jobId} state=${after}`);
+  likeDebug(jobId, { after_like_state: after, verify_pass: 1 });
   if (after !== "on") {
     console.info(`[worker] like step=click_retry job=${jobId}`);
+    const networkWait2 = waitLikeNetwork(page, 4_000);
     await clickProbe(page, probe, jobId);
+    await networkWait2;
     await sleep(1_000);
     after = await recheckState(page, probe);
     console.info(`[worker] like step=verify2 job=${jobId} state=${after}`);
+    likeDebug(jobId, { after_like_state: after, verify_pass: 2 });
   }
 
   if (after !== "on") {
     console.error(`[worker] like failed job=${jobId} reason=verify`);
+    likeDebug(jobId, {
+      after_like_state: after,
+      verify_result: "failed",
+      like_network_seen: network.seen,
+    });
     return failLike(jobId, {
-      error_code: "VERIFY_FAILED",
+      error_code: "LIKE_VERIFY_FAILED",
       error_message: "공감 클릭 후 상태가 반영되지 않았습니다",
       failed_step: "verify",
       steps,
-      detail: { url, current_url: page.url(), state_after: after },
+      detail: {
+        url,
+        current_url: page.url(),
+        state_after: after,
+        like_network_seen: network.seen,
+        like_network_url: network.url,
+      },
     });
   }
 
   console.info(`[worker] like completed job=${jobId}`);
+  likeDebug(jobId, {
+    after_like_state: "on",
+    click_result: "ok",
+    verify_result: "ok",
+    like_network_seen: network.seen,
+  });
   return { ok: true, jobId, url: page.url(), alreadyLiked: false };
 }
 

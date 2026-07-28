@@ -14,7 +14,7 @@ export function ComingSoonModal({
   onClose: () => void;
 }) {
   return (
-    <AppModal open={open} title={title} onClose={onClose}>
+    <AppModal open={open} title={title} onClose={onClose} footer={null}>
       <p className="text-sm leading-relaxed text-muted-foreground">{message}</p>
     </AppModal>
   );

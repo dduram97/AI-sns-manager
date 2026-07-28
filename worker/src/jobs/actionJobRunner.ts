@@ -704,7 +704,13 @@ export async function claimJobRunning(
 export async function updateJobResult(
   db: DatabaseClient,
   result:
-    | { ok: true; jobId: string; note?: string }
+    | {
+        ok: true;
+        jobId: string;
+        note?: string;
+        previousTargetRef?: Record<string, unknown> | null;
+        executionExtra?: Record<string, unknown>;
+      }
     | {
         ok: false;
         jobId: string;
@@ -720,17 +726,47 @@ export async function updateJobResult(
       },
 ): Promise<void> {
   if (result.ok === true) {
+    let previous = result.previousTargetRef ?? null;
+    if (!previous) {
+      const { data } = await db
+        .from("action_jobs")
+        .select("target_ref")
+        .eq("id", result.jobId)
+        .maybeSingle();
+      previous = (data?.target_ref as Record<string, unknown> | null) ?? null;
+    }
+    const target_ref = mergeExecutionResultIntoTargetRef(previous, {
+      outcome: "executed",
+      reason_code: "EXECUTED",
+      reason_message: result.note ?? "executed",
+      failed_step: "verify",
+      detail: {
+        note: result.note ?? null,
+        ...(result.executionExtra ?? {}),
+      },
+      steps: ["executed"],
+      ...(result.executionExtra ?? {}),
+    });
     const { error } = await db
       .from("action_jobs")
       .update({
         status: "executed",
         executed_at: new Date().toISOString(),
         error: null,
+        target_ref,
         updated_at: new Date().toISOString(),
       })
       .eq("id", result.jobId)
       .in("status", ["running", "planned", "approved"]);
     if (error) throw new Error(`updateJobResult executed: ${error.message}`);
+    console.info("[action_result]", {
+      jobId: result.jobId,
+      actionType: previous?.action_type ?? null,
+      status: "executed",
+      errorCode: null,
+      errorMessage: null,
+      note: result.note ?? null,
+    });
     return;
   }
 
@@ -768,6 +804,13 @@ export async function updateJobResult(
       .eq("id", result.jobId)
       .in("status", ["running", "planned", "approved"]);
     if (error) throw new Error(`updateJobResult skipped: ${error.message}`);
+    console.info("[action_result]", {
+      jobId: result.jobId,
+      actionType: null,
+      status,
+      errorCode: result.skip.reason_code,
+      errorMessage: result.skip.reason_message,
+    });
 
     // Persist candidate exclusion for neighbor soft-skips
     if (status === "excluded") {
@@ -837,6 +880,13 @@ export async function updateJobResult(
     .eq("id", result.jobId)
     .in("status", ["running", "planned", "approved"]);
   if (error) throw new Error(`updateJobResult failed: ${error.message}`);
+  console.info("[action_result]", {
+    jobId: result.jobId,
+    actionType: null,
+    status: "failed",
+    errorCode: failure.error_code,
+    errorMessage: failure.error_message,
+  });
 }
 
 export async function detectPendingActionJobs(
@@ -1092,8 +1142,21 @@ export async function runLikeActionJobs(
         note: likeResult.alreadyLiked
           ? `like already_liked ${likeResult.url}`
           : `like ${likeResult.url}`,
+        previousTargetRef: job.target_ref,
+        executionExtra: {
+          already_liked: likeResult.alreadyLiked,
+          url: likeResult.url,
+        },
       });
       executed += 1;
+      console.info("[action_result]", {
+        jobId: job.id,
+        actionType: "like",
+        status: "executed",
+        errorCode: null,
+        errorMessage: null,
+        alreadyLiked: likeResult.alreadyLiked,
+      });
       logActionEvent({
         phase: "result",
         jobId: job.id,
@@ -1108,6 +1171,13 @@ export async function runLikeActionJobs(
         jobId: job.id,
         skip: likeResult.skip,
         previousTargetRef: job.target_ref,
+      });
+      console.info("[action_result]", {
+        jobId: job.id,
+        actionType: "like",
+        status: "skipped",
+        errorCode: likeResult.skip.reason_code,
+        errorMessage: likeResult.skip.reason_message,
       });
       logActionEvent({
         phase: "result",
@@ -1129,6 +1199,13 @@ export async function runLikeActionJobs(
         previousTargetRef: job.target_ref,
       });
       failed += 1;
+      console.info("[action_result]", {
+        jobId: job.id,
+        actionType: "like",
+        status: "failed",
+        errorCode: failure.error_code,
+        errorMessage: failure.error_message,
+      });
       logActionEvent({
         phase: "result",
         jobId: job.id,
@@ -1370,8 +1447,17 @@ export async function runCommentActionJobs(
         ok: true,
         jobId: job.id,
         note: `comment ${commentResult.url}`,
+        previousTargetRef: job.target_ref,
+        executionExtra: { url: commentResult.url },
       });
       executed += 1;
+      console.info("[action_result]", {
+        jobId: job.id,
+        actionType: "comment",
+        status: "executed",
+        errorCode: null,
+        errorMessage: null,
+      });
       logActionEvent({
         phase: "result",
         jobId: job.id,
@@ -1391,6 +1477,13 @@ export async function runCommentActionJobs(
         previousTargetRef: job.target_ref,
       });
       failed += 1;
+      console.info("[action_result]", {
+        jobId: job.id,
+        actionType: "comment",
+        status: "failed",
+        errorCode: failure.error_code,
+        errorMessage: failure.error_message,
+      });
       logActionEvent({
         phase: "result",
         jobId: job.id,

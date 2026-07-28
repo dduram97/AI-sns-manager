@@ -3,7 +3,9 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { markNeighborCareDoneTodayAction, snoozeNeighborCareTodayAction } from "@/app/actions/neighbors";
+import { ReplyVisitSummaryCard } from "@/components/neighbor/ReplyVisitSummaryCard";
 import { kstTodayYmd } from "@/lib/completedRange";
+import type { ReplyVisitSummary } from "@/services/replyVisitTaskService";
 import {
   careStatusLabel,
   daysSince,
@@ -673,12 +675,16 @@ export function NeighborManageList({
   items,
   todayActions = { visit: 0, like: 0, comment: 0 },
   weeklyReport = emptyNeighborWeeklyReport(),
+  replyVisitSummary = null,
+  replyVisitSummaryLoading = false,
   onSelect,
   onListRefresh,
 }: {
   items: NeighborManageListItem[];
   todayActions?: NeighborManageTodayActions;
   weeklyReport?: NeighborManageWeeklyReport;
+  replyVisitSummary?: ReplyVisitSummary | null;
+  replyVisitSummaryLoading?: boolean;
   onSelect: (personId: string) => void;
   onListRefresh?: () => Promise<void>;
 }) {
@@ -832,6 +838,12 @@ export function NeighborManageList({
         comment={opsSummary.comment}
       />
       <WeeklyOpsReportCard report={weeklyReport} onSelect={onSelect} />
+
+      {/* Reply-visit workflow entry (list lives on /neighbors/reply) */}
+      <ReplyVisitSummaryCard
+        summary={replyVisitSummary}
+        loading={replyVisitSummaryLoading}
+      />
 
       {/* 2. Now todo — max 3 incomplete */}
       <section className="space-y-2">

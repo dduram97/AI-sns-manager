@@ -187,7 +187,10 @@ export function NeighborFeedApprovalInbox({
     return list;
   }, [openItems, openFilter, pinnedApprovalId]);
 
-  const openTotalPages = Math.max(1, Math.ceil(filteredOpen.length / PAGE_SIZE));
+  const openTotalPages = Math.max(
+    1,
+    Math.ceil(filteredOpen.length / PAGE_SIZE),
+  );
   const pagedOpen = useMemo(() => {
     const page = Math.min(openPage, openTotalPages);
     const from = (page - 1) * PAGE_SIZE;
@@ -518,7 +521,10 @@ export function NeighborFeedApprovalInbox({
       const next = { ...prev };
       for (const item of pagedOpen) {
         const probe = neighborFeedDraftProbeFromInboxItem(item);
-        if (isNeighborFeedDraftFresh(probe) || !needsNeighborFeedAiDraft(probe)) {
+        if (
+          isNeighborFeedDraftFresh(probe) ||
+          !needsNeighborFeedAiDraft(probe)
+        ) {
           next[item.approval.id] = "ready";
         } else if (!next[item.approval.id]) {
           next[item.approval.id] = "idle";
@@ -574,9 +580,7 @@ export function NeighborFeedApprovalInbox({
       );
       await sleep(Math.min(200, Math.max(0, end - Date.now())));
     }
-    setProgress((prev) =>
-      prev ? { ...prev, nextDelaySec: null } : prev,
-    );
+    setProgress((prev) => (prev ? { ...prev, nextDelaySec: null } : prev));
   }
 
   function showConfirmForIds(ids: string[], mode: ApprovalExecuteMode) {
@@ -703,9 +707,7 @@ export function NeighborFeedApprovalInbox({
         let draftBody = drafts.get(id);
         if (row && (mode === "comment" || mode === "both")) {
           const userProvided =
-            draftBody != null &&
-            draftBody.trim().length > 0 &&
-            drafts.has(id);
+            draftBody != null && draftBody.trim().length > 0 && drafts.has(id);
           if (!userProvided) {
             try {
               // Reuse fresh preview; regenerate if missing/stale (uses stored post title/summary)
@@ -956,8 +958,7 @@ export function NeighborFeedApprovalInbox({
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">
                   🟢 {aiGenProgress.success}건 · 🟡 진행중{" "}
-                  {aiGenProgress.inFlight}건 · ⚪ 대기 {aiGenProgress.waiting}
-                  건
+                  {aiGenProgress.inFlight}건 · ⚪ 대기 {aiGenProgress.waiting}건
                   {aiGenProgress.failed > 0
                     ? ` · 🔴 실패 ${aiGenProgress.failed}건`
                     : ""}
@@ -984,7 +985,7 @@ export function NeighborFeedApprovalInbox({
                     selected={selected.has(item.approval.id)}
                     preferredMode={
                       pinnedApprovalId === item.approval.id
-                        ? focusMode ?? undefined
+                        ? (focusMode ?? undefined)
                         : undefined
                     }
                     onSelectedChange={(next) =>

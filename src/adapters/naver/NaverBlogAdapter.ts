@@ -5,6 +5,11 @@ import type {
   ChannelAdapter,
 } from "../types";
 import {
+  classifyWorkerErrorText,
+  failureToErrorColumn,
+  makeFailure,
+} from "../../lib/actionFailure";
+import {
   getNaverBrowserSession,
   type BrowserSessionManager,
 } from "../browser/BrowserSessionManager";
@@ -32,6 +37,15 @@ import {
   holdBrowserForDebug,
   isLikeDebugEnabled,
 } from "./likeClickDebug";
+import {
+  clickCommentSubmit,
+  commentDebug,
+  probeLoginRequired,
+  resolveCommentPageUrl,
+  verifyCommentSubmitted,
+  waitForCommentInput,
+  COMMENT_INPUT_SELECTORS,
+} from "./commentHelpers";
 import {
   traceEnter,
   traceReturn,
@@ -236,17 +250,52 @@ async function clickFirst(
   return false;
 }
 
-/** Naver mobile comment box selectors (contenteditable + textarea fallbacks). */
-const NAVER_COMMENT_INPUT_SELECTORS = [
-  "#naverComment__write_textarea",
-  "#naverCommentwrite_textarea",
-  'div.u_cbox_text[contenteditable="true"]',
-  '[contenteditable="true"].u_cbox_text',
-  "div.u_cbox_write_area [contenteditable='true']",
-  "textarea.u_cbox_text",
-  ".u_cbox_text",
-  "textarea[placeholder*='댓글']",
-];
+type BuddyAddKind = "mutual" | "one_way_only" | "none";
+
+/** Visible button scan — avoids body.innerText false positives (이웃추가 in nav). */
+async function probeBuddyAddKind(page: Page): Promise<BuddyAddKind> {
+  return page.evaluate(`(() => {
+    function visible(el) {
+      if (!el) return false;
+      var s = window.getComputedStyle(el);
+      if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+      var r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }
+    var hasMutual = false;
+    var hasOneWay = false;
+    var nodes = document.querySelectorAll('a, button');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (!visible(el)) continue;
+      var t = ((el.innerText || el.textContent || '') + '').replace(/\\s+/g, '');
+      if (t.indexOf('서로이웃추가') >= 0) hasMutual = true;
+      if (t.indexOf('이웃추가') >= 0 && t.indexOf('서로이웃') < 0) hasOneWay = true;
+    }
+    if (hasMutual) return 'mutual';
+    if (hasOneWay) return 'one_way_only';
+    return 'none';
+  })()`) as Promise<BuddyAddKind>;
+}
+
+async function probeMutualOptionInForm(page: Page): Promise<boolean> {
+  await page
+    .locator('label:has-text("서로이웃"), label:has-text("이웃으로 추가")')
+    .first()
+    .waitFor({ state: "attached", timeout: 8_000 })
+    .catch(() => undefined);
+  return page.evaluate(`(() => {
+    var body = ((document.body && document.body.innerText) || '');
+    if (/서로이웃을\\s*신청|서로이웃추가/.test(body)) return true;
+    var nodes = document.querySelectorAll('label, input[type="radio"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var t = ((el.innerText || el.textContent || el.value || '') + '');
+      if (/서로이웃/.test(t)) return true;
+    }
+    return false;
+  })()`) as Promise<boolean>;
+}
 
 /**
  * Focus/fill Naver comment input.
@@ -282,7 +331,7 @@ async function focusAndFillNaverComment(
   }
 
   const area = page
-    .locator(NAVER_COMMENT_INPUT_SELECTORS.join(", "))
+    .locator(COMMENT_INPUT_SELECTORS.join(", "))
     .first();
   await area.waitFor({ state: "attached", timeout: 15_000 });
   await area.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => undefined);
@@ -306,7 +355,7 @@ async function focusAndFillNaverComment(
         el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         return;
       }
-    }, NAVER_COMMENT_INPUT_SELECTORS);
+    }, COMMENT_INPUT_SELECTORS);
   }
 
   await sleep(150);
@@ -356,10 +405,32 @@ function mockOk(action: string, externalRef?: string): ChannelActionResult {
   return { ok: true, externalRef };
 }
 
-function fail(err: unknown): ChannelActionResult {
+function likeDebug(jobId: string, fields: Record<string, unknown>): void {
+  console.info("[LIKE_DEBUG]", { job_id: jobId, ...fields });
+}
+
+function failStructured(input: {
+  error_code: string;
+  error_message: string;
+  failed_step: string;
+  detail?: Record<string, unknown>;
+  steps?: string[];
+}): ChannelActionResult {
+  const failure = makeFailure(input);
   return {
     ok: false,
-    errorMessage: err instanceof Error ? err.message : String(err),
+    errorMessage: failureToErrorColumn(failure),
+    failure,
+  };
+}
+
+function fail(err: unknown, fallbackStep = "unknown"): ChannelActionResult {
+  const msg = err instanceof Error ? err.message : String(err);
+  const failure = classifyWorkerErrorText(msg, fallbackStep);
+  return {
+    ok: false,
+    errorMessage: failureToErrorColumn(failure),
+    failure,
   };
 }
 
@@ -433,6 +504,7 @@ export class NaverBlogAdapter implements ChannelAdapter {
 
   async like(input: ChannelActionInput): Promise<ChannelActionResult> {
     traceEnter("NaverBlogAdapter.like", `mode=${this.mode}`);
+    const jobId = input.job.id;
     const validated = validateLikeTarget(input);
     if (isFailResult(validated)) {
       traceBlocked("no_target", !validated.ok ? validated.errorMessage : "");
@@ -449,30 +521,59 @@ export class NaverBlogAdapter implements ChannelAdapter {
       return mockOk("Like", postUrl!);
     }
 
+    const steps: string[] = ["visit_start"];
+    likeDebug(jobId, { target_url: postUrl, phase: "start" });
+
     try {
       /** already_liked | not_available | null */
       let likeSkip: "already_liked" | "not_available" | null = null;
+      let likeMeta: Record<string, unknown> = {};
       await withPage(this.session, "like", async (page) => {
         console.log(
           `[TRACE] NaverBlogAdapter.like page.fn start url=${postUrl}`,
         );
-        await page.goto(postUrl!, {
-          waitUntil: "domcontentloaded",
-          timeout: this.session.navigationTimeoutMs,
+        try {
+          await page.goto(postUrl!, {
+            waitUntil: "domcontentloaded",
+            timeout: this.session.navigationTimeoutMs,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          likeDebug(jobId, { page_loaded: false, error: message });
+          throw err;
+        }
+        steps.push("goto", "post_loaded");
+        const pageUrl = page.url();
+        const title = await page.title().catch(() => "");
+        const loginRequired = await probeLoginRequired(page);
+        likeDebug(jobId, {
+          page_url_after_goto: pageUrl,
+          title,
+          login_status: loginRequired ? "required" : "ok",
         });
-        // Sympathy area wait already polls UI — keep only a short settle.
+        if (loginRequired) {
+          throw new Error("LOGIN_REQUIRED: 네이버 로그인이 필요합니다");
+        }
+
         await sleep(250);
         await waitForSympathyArea(page, 12_000);
 
         const probe = await probeSympathyButton(page);
+        likeDebug(jobId, {
+          like_button_found: probe.state !== "missing" && Boolean(probe.locator),
+          selector: probe.matchedSelector ?? null,
+          before_state: probe.state,
+        });
         console.log(
           `[NaverBlogAdapter:live] Like probe state=${probe.state} selector=${probe.matchedSelector ?? "none"} candidates=${probe.candidatesLogged.length}`,
         );
         traceSetCondition("adapterProbeState", probe.state);
         traceSetCondition("alreadyLiked", probe.state === "on");
+        steps.push("like_button_search");
 
         if (probe.state === "on") {
           likeSkip = "already_liked";
+          likeMeta = { already_liked: true, selector: probe.matchedSelector };
           traceBlocked("already_liked", "(adapter probe)");
           console.log(
             `[NaverBlogAdapter:live] Like skipped (already red heart) → ${postUrl}`,
@@ -489,16 +590,29 @@ export class NaverBlogAdapter implements ChannelAdapter {
         }
 
         console.log(`[TRACE] NaverBlogAdapter.like calling clickSympathyIfOff`);
+        steps.push("like_click");
         const result = await clickSympathyIfOff(page);
+        likeDebug(jobId, {
+          click_result: result.clicked ? "clicked" : "not_clicked",
+          verify_result: result.verifiedOn ? "on" : "off",
+          selector: result.selector ?? probe.matchedSelector ?? null,
+          error: result.error ?? null,
+        });
         if (!result.clicked && !result.verifiedOn) {
           traceBlocked(
             "click_not_clickable",
             `clicked=${result.clicked} verifiedOn=${result.verifiedOn} error=${result.error}`,
           );
-          throw new Error("Like button not clickable");
+          throw new Error(
+            `Like button not clickable${result.error ? `: ${result.error}` : ""}`,
+          );
         }
         if (result.verifiedOn && !result.clicked) {
           likeSkip = "already_liked";
+          likeMeta = {
+            already_liked: true,
+            selector: result.selector ?? probe.matchedSelector,
+          };
           return;
         }
 
@@ -521,6 +635,12 @@ export class NaverBlogAdapter implements ChannelAdapter {
             `Like click did not register (still empty heart) ${hint}`,
           );
         }
+        likeMeta = {
+          already_liked: false,
+          selector: result.selector ?? probe.matchedSelector,
+          verified_on: true,
+        };
+        steps.push("verify");
         console.log(`[TRACE] NaverBlogAdapter.like page.fn success`);
       });
 
@@ -536,25 +656,76 @@ export class NaverBlogAdapter implements ChannelAdapter {
           outcome: "not_available",
           reasonCode: "LIKE_BUTTON_NOT_AVAILABLE",
           reasonMessage: "공감 버튼이 없는 글입니다.",
+          failedStep: "button_search",
+          steps,
+          detail: { url: postUrl, blog_id: blogId, log_no: logNo },
         };
       }
       if (likeSkip === "already_liked") {
         traceReturn("NaverBlogAdapter.like", "already_liked", "skipped=true");
-        return { ok: true, externalRef: postUrl!, skipped: true };
+        return {
+          ok: true,
+          externalRef: postUrl!,
+          skipped: true,
+          steps,
+          executionResult: {
+            already_liked: true,
+            url: postUrl,
+            like: likeMeta,
+          },
+        };
       }
       console.log(
         `[NaverBlogAdapter:live] Like executed → ${postUrl} (${blogId ?? "?"}/${logNo ?? "?"})`,
       );
       traceReturn("NaverBlogAdapter.like", "like_ok");
-      return { ok: true, externalRef: postUrl!, outcome: "executed" };
+      return {
+        ok: true,
+        externalRef: postUrl!,
+        outcome: "executed",
+        steps,
+        executionResult: {
+          already_liked: false,
+          url: postUrl,
+          like: likeMeta,
+        },
+      };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       traceReturn("NaverBlogAdapter.like", "like_throw", msg.slice(0, 200));
-      return fail(err);
+      if (/LOGIN_REQUIRED/i.test(msg)) {
+        return failStructured({
+          error_code: "LOGIN_REQUIRED",
+          error_message: "네이버 로그인이 필요합니다",
+          failed_step: "post_loaded",
+          steps,
+          detail: { url: postUrl },
+        });
+      }
+      if (/not clickable/i.test(msg)) {
+        return failStructured({
+          error_code: "LIKE_CLICK_FAILED",
+          error_message: msg,
+          failed_step: "like_click",
+          steps,
+          detail: { url: postUrl },
+        });
+      }
+      if (/still empty heart|did not register/i.test(msg)) {
+        return failStructured({
+          error_code: "LIKE_VERIFY_FAILED",
+          error_message: msg,
+          failed_step: "verify",
+          steps,
+          detail: { url: postUrl },
+        });
+      }
+      return fail(err, "like_click");
     }
   }
 
   async comment(input: ChannelActionInput): Promise<ChannelActionResult> {
+    const jobId = input.job.id;
     const validated = validateCommentTarget(input);
     if (isFailResult(validated)) return validated;
     const { postUrl, blogId, logNo, body } = validated;
@@ -562,61 +733,178 @@ export class NaverBlogAdapter implements ChannelAdapter {
 
     if (this.mode === "mock") return mockOk("Comment", postUrl!);
 
+    const steps: string[] = ["visit_start"];
+    const commentUrl = resolveCommentPageUrl({
+      postUrl: postUrl!,
+      blogId,
+      logNo,
+      targetRef: input.targetRef,
+    });
+    commentDebug(jobId, { url: commentUrl, phase: "start", body_len: body.length });
+
     try {
+      let commentMeta: Record<string, unknown> = {};
       await withPage(this.session, "comment", async (page) => {
-        let commentUrl = postUrl!;
-        if (blogId && logNo) {
-          commentUrl = `https://m.blog.naver.com/CommentList.naver?blogId=${encodeURIComponent(blogId)}&logNo=${encodeURIComponent(logNo)}`;
+        try {
+          await page.goto(commentUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: this.session.navigationTimeoutMs,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          commentDebug(jobId, { page_loaded: false, error: message });
+          throw err;
+        }
+        steps.push("goto", "post_loaded");
+        await sleep(1_200);
+        const pageUrl = page.url();
+        const title = await page.title().catch(() => "");
+        commentDebug(jobId, {
+          page_loaded: true,
+          page_url: pageUrl,
+          title,
+        });
+
+        if (!/[?&]modal=comment/i.test(pageUrl) && /PostView|blog\.naver\.com/i.test(pageUrl)) {
+          const next = pageUrl.includes("?")
+            ? `${pageUrl}&modal=comment`
+            : `${pageUrl}?modal=comment`;
+          await page
+            .goto(next, { waitUntil: "domcontentloaded", timeout: this.session.navigationTimeoutMs })
+            .catch(() => undefined);
+          await sleep(1_200);
+          commentDebug(jobId, { page_url_after_modal: page.url() });
         }
 
-        await page.goto(commentUrl, {
-          waitUntil: "domcontentloaded",
-          timeout: this.session.navigationTimeoutMs,
+        if (await probeLoginRequired(page)) {
+          throw new Error("LOGIN_REQUIRED: 네이버 로그인이 필요합니다");
+        }
+
+        steps.push("comment_input_search");
+        const inputSelector = await waitForCommentInput(page, 12_000);
+        commentDebug(jobId, {
+          comment_area_found: Boolean(inputSelector),
+          input_selector: inputSelector,
         });
-        // Prefer comment-input readiness over fixed long sleep.
-        await page
-          .locator(NAVER_COMMENT_INPUT_SELECTORS.join(", "))
-          .first()
-          .waitFor({ state: "attached", timeout: 12_000 })
-          .catch(() => undefined);
-        await sleep(250);
+        if (!inputSelector) {
+          throw new Error("COMMENT_INPUT_NOT_FOUND");
+        }
 
+        steps.push("fill_begin");
         await focusAndFillNaverComment(page, body);
-        await sleep(200);
+        const filled = await page
+          .locator(inputSelector)
+          .first()
+          .evaluate((el) => {
+            if (
+              el instanceof HTMLTextAreaElement ||
+              el instanceof HTMLInputElement
+            ) {
+              return el.value.trim().length;
+            }
+            return (el.textContent ?? "").trim().length;
+          })
+          .catch(() => 0);
+        commentDebug(jobId, {
+          input_fill_result: filled > 0 ? `ok len=${filled}` : "empty",
+        });
+        if (!filled || filled < Math.min(2, body.length)) {
+          throw new Error("COMMENT_FILL_FAILED");
+        }
 
-        const submitted = await clickFirst(page, [
-          "button.u_cbox_btn_upload",
-          ".u_cbox_btn_upload",
-          'button:has-text("등록")',
-          'a:has-text("등록")',
-        ]);
-        if (!submitted) {
+        steps.push("comment_submit");
+        const submitted = await clickCommentSubmit(page);
+        commentDebug(jobId, {
+          submit_selector: submitted.selector,
+          submit_click_result: submitted.ok ? "ok" : "failed",
+        });
+        if (!submitted.ok) {
           throw new Error("Comment submit button not found");
         }
-        // Confirm settle via short poll / networkidle instead of fixed 1s.
-        const settled = await waitUntil(
-          async () => {
-            const busy = await page
-              .locator(
-                "button.u_cbox_btn_upload[disabled], .u_cbox_btn_upload.u_cbox_btn_upload_off",
-              )
-              .count()
-              .catch(() => 0);
-            return busy > 0;
-          },
-          { timeoutMs: 2_500, intervalMs: 150 },
-        );
-        if (!settled) {
-          await page
-            .waitForLoadState("networkidle", { timeout: 2_000 })
-            .catch(() => undefined);
-          await sleep(300);
+        await sleep(1_200);
+
+        steps.push("verify");
+        const verified = await verifyCommentSubmitted(page, body);
+        commentDebug(jobId, {
+          verify_result: verified.ok ? "ok" : verified.detail,
+        });
+        if (!verified.ok) {
+          throw new Error(`COMMENT_VERIFY_FAILED: ${verified.detail}`);
         }
+        commentMeta = {
+          url: commentUrl,
+          input_selector: inputSelector,
+          submit_selector: submitted.selector,
+          verify_detail: verified.detail,
+        };
       });
       console.log(`[NaverBlogAdapter:live] Comment executed → ${postUrl}`);
-      return { ok: true, externalRef: postUrl! };
+      return {
+        ok: true,
+        externalRef: postUrl!,
+        steps,
+        executionResult: {
+          url: commentUrl,
+          comment: commentMeta,
+        },
+      };
     } catch (err) {
-      return fail(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/LOGIN_REQUIRED/i.test(msg)) {
+        return failStructured({
+          error_code: "LOGIN_REQUIRED",
+          error_message: "네이버 로그인이 필요합니다",
+          failed_step: "post_loaded",
+          steps,
+          detail: { url: commentUrl },
+        });
+      }
+      if (/COMMENT_INPUT_NOT_FOUND/i.test(msg)) {
+        return failStructured({
+          error_code: "COMMENT_INPUT_NOT_FOUND",
+          error_message: "댓글 입력창을 찾지 못했습니다",
+          failed_step: "comment_input_search",
+          steps,
+          detail: { url: commentUrl },
+        });
+      }
+      if (/COMMENT_FILL_FAILED/i.test(msg)) {
+        return failStructured({
+          error_code: "COMMENT_FILL_FAILED",
+          error_message: "댓글 입력창에 내용이 반영되지 않았습니다",
+          failed_step: "fill_begin",
+          steps,
+          detail: { url: commentUrl },
+        });
+      }
+      if (/submit button not found|COMMENT_SUBMIT/i.test(msg)) {
+        return failStructured({
+          error_code: "COMMENT_SUBMIT_FAILED",
+          error_message: "댓글 등록 버튼을 찾지 못했거나 클릭에 실패했습니다",
+          failed_step: "comment_submit",
+          steps,
+          detail: { url: commentUrl },
+        });
+      }
+      if (/COMMENT_VERIFY_FAILED/i.test(msg)) {
+        return failStructured({
+          error_code: "COMMENT_VERIFY_FAILED",
+          error_message: msg.replace(/^COMMENT_VERIFY_FAILED:\s*/, ""),
+          failed_step: "verify",
+          steps,
+          detail: { url: commentUrl },
+        });
+      }
+      if (/page\.goto|navigation|timeout/i.test(msg)) {
+        return failStructured({
+          error_code: "GOTO_FAILED",
+          error_message: `페이지 이동 실패: ${msg}`,
+          failed_step: "goto",
+          steps,
+          detail: { url: commentUrl },
+        });
+      }
+      return fail(err, "comment_input_search");
     }
   }
 
@@ -655,15 +943,10 @@ export class NaverBlogAdapter implements ChannelAdapter {
         });
         await sleep(1_200);
 
-        const bodyText = (
-          (await page.locator("body").innerText().catch(() => "")) || ""
-        ).replace(/\s+/g, " ");
-        const hasMutualBtn = /서로이웃추가/.test(bodyText);
-        const hasOneWayBtn =
-          /이웃추가/.test(bodyText) && !/서로이웃추가/.test(bodyText);
-        if (hasOneWayBtn && !hasMutualBtn) {
-          throw new Error("NEIGHBOR_MUTUAL_NOT_AVAILABLE");
-        }
+        const buddyKind = await probeBuddyAddKind(page);
+        console.log(
+          `[NaverBlogAdapter:live] mutual_request buddy_add_kind=${buddyKind} url=${page.url()}`,
+        );
 
         const opened = await clickFirst(page, [
           'a:has-text("서로이웃추가")',
@@ -679,6 +962,16 @@ export class NaverBlogAdapter implements ChannelAdapter {
         }
 
         await sleep(800);
+
+        if (buddyKind === "one_way_only") {
+          const mutualInForm = await probeMutualOptionInForm(page);
+          console.log(
+            `[NaverBlogAdapter:live] mutual_request mutual_in_form=${mutualInForm}`,
+          );
+          if (!mutualInForm) {
+            throw new Error("NEIGHBOR_MUTUAL_NOT_AVAILABLE");
+          }
+        }
 
         await clickFirst(page, [
           'input[type="radio"][value="1"]',

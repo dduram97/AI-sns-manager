@@ -330,7 +330,7 @@ export type DecisionOutput =
   | ({
       kind: "create_approval";
       draft: {
-        action_type: "comment" | "neighbor_request" | "threads_reply";
+        action_type: "comment" | "like" | "neighbor_request" | "threads_reply";
         body: string;
         alternatives: string[];
         target_ref: Record<string, unknown>;
@@ -391,7 +391,7 @@ export interface DecisionBlackboard {
     reason: string;
   };
   draft?: {
-    action_type: "comment" | "neighbor_request" | "threads_reply";
+    action_type: "comment" | "like" | "neighbor_request" | "threads_reply";
     body: string;
     alternatives: string[];
     target_ref: Record<string, unknown>;

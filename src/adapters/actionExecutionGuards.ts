@@ -87,8 +87,13 @@ export function guardDailyLimit(
   outcome: OutcomeLike,
 ): string | null {
   const limits = policy.daily_limits ?? {};
+  const replyVisitImmediate =
+    job.target_ref?.source === "reply_visit_immediate" ||
+    job.target_ref?.reply_visit === true;
+  // Intentional UI click on 답방 관리 — allow even when Agent auto like is off.
   if (
     !policy.low_risk_auto &&
+    !replyVisitImmediate &&
     (job.action_type === "visit" || job.action_type === "like")
   ) {
     return "low_risk_auto_disabled";

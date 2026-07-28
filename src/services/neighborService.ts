@@ -7,6 +7,7 @@ import "server-only";
 
 import { createServiceClient } from "@/lib/supabase";
 import { runWithDbTrace, traceQuery, rowCountFrom } from "@/lib/dbTrace";
+import { neighborCandidateDiscoveryDisplay } from "@/lib/neighborCandidateDisplay";
 import { NaverDiscoverAdapter } from "@/adapters/naver/NaverDiscoverAdapter";
 import type { DiscoverCandidate } from "@/adapters/naver/NaverDiscoverAdapter";
 import {
@@ -458,6 +459,13 @@ function buildNeighborCandidatesFromRows(input: {
         ? storedReasons.slice(0, 5)
         : scored.reasons;
 
+    const discoveryDisplay = neighborCandidateDiscoveryDisplay(meta, np.keywords, {
+      keywordMatchRate,
+      adScore,
+      recommendScore,
+      lastActivityLabel: relativeActivityLabel(scored.lastPostAt),
+    });
+
     out.push({
       personId: row.person.id,
       blogId,
@@ -479,6 +487,11 @@ function buildNeighborCandidatesFromRows(input: {
       recommendReasons,
       hasOpenApproval: openPersons.has(row.person.id),
       alreadyRequested: already.has(blogId.toLowerCase()),
+      searchKeyword: discoveryDisplay.searchKeyword,
+      searchRank: discoveryDisplay.searchRank,
+      collectSource: discoveryDisplay.collectSource,
+      recentlyActive: discoveryDisplay.recentlyActive,
+      scoreBreakdown: discoveryDisplay.scoreBreakdown,
     });
   }
 

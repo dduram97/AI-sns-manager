@@ -261,6 +261,8 @@ export async function searchCandidatesViaNaverApi(input: {
   keywords: string[];
   maxPerKeyword?: number;
   maxTotal?: number;
+  /** Naver API sort — default date (neighbor collect). Use sim for relevance ranking. */
+  sort?: "sim" | "date";
 }): Promise<{
   candidates: DiscoverCandidate[];
   errors: string[];
@@ -273,6 +275,7 @@ export async function searchCandidatesViaNaverApi(input: {
   const seen = new Set<string>();
   const maxPerKeyword = input.maxPerKeyword ?? 30;
   const maxTotal = input.maxTotal ?? 120;
+  const sort = input.sort ?? "date";
   let rawItemCount = 0;
   let duplicatesRemoved = 0;
 
@@ -291,7 +294,7 @@ export async function searchCandidatesViaNaverApi(input: {
           query: keyword,
           display: pageSize,
           start,
-          sort: "date",
+          sort,
         });
         if (items.length === 0) break;
         rawItemCount += items.length;

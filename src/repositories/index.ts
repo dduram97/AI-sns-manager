@@ -264,8 +264,14 @@ export function createRepositories(db: DatabaseClient) {
       );
     },
 
-    async markActionExecuted(jobId: string): Promise<ActionJob> {
-      return approval.markJobExecuted(jobId);
+    async markActionExecuted(
+      jobId: string,
+      opts?: {
+        note?: string;
+        executionResult?: Record<string, unknown>;
+      },
+    ): Promise<ActionJob> {
+      return approval.markJobExecuted(jobId, opts);
     },
 
     async markActionRunning(jobId: string): Promise<ActionJob> {
@@ -281,13 +287,21 @@ export function createRepositories(db: DatabaseClient) {
         failedStep?: string;
         outcome?: string;
         detail?: Record<string, unknown>;
+        steps?: string[];
       },
     ): Promise<ActionJob> {
       return approval.markJobSkipped(jobId, input);
     },
 
-    async markActionFailed(jobId: string, message: string): Promise<ActionJob> {
-      return approval.markJobFailed(jobId, message);
+    async markActionFailed(
+      jobId: string,
+      message: string,
+      opts?: {
+        errorCode?: string;
+        failure?: import("../lib/actionFailure").ActionFailureDetail;
+      },
+    ): Promise<ActionJob> {
+      return approval.markJobFailed(jobId, message, opts);
     },
 
     async markActionFailedWithCode(

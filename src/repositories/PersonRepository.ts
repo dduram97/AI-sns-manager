@@ -18,6 +18,42 @@ import {
   type NextActionType,
 } from "./shared";
 
+const LIST_CRM_ROWS_CHUNK_SIZE = 100;
+
+type PostgrestErrorLike = {
+  message?: string;
+  code?: string;
+  details?: string;
+  hint?: string;
+};
+
+function chunkArray<T>(items: T[], size: number): T[][] {
+  if (items.length === 0) return [];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+function logPersonRepoFetchError(
+  operation: string,
+  chunkIndex: number,
+  chunkTotal: number,
+  chunkSize: number,
+  error: PostgrestErrorLike,
+): void {
+  console.error("[PersonRepository]", {
+    operation,
+    chunk: `${chunkIndex + 1}/${chunkTotal}`,
+    size: chunkSize,
+    message: error.message ?? "fetch failed",
+    code: error.code ?? null,
+    details: error.details ?? null,
+    hint: error.hint ?? null,
+  });
+}
+
 export function createPersonRepository(db: DatabaseClient) {
   return {
     async list(): Promise<Person[]> {
@@ -353,6 +389,13 @@ export function createPersonRepository(db: DatabaseClient) {
         (r) => rowCountFrom(r.data),
       );
       if (personsRes.error) {
+        logPersonRepoFetchError(
+          "persons.list_crm",
+          0,
+          1,
+          0,
+          personsRes.error,
+        );
         throw new Error(`PersonRepository.listCrmRows: ${personsRes.error.message}`);
       }
       const persons = (personsRes.data ?? []).map((r) =>
@@ -361,50 +404,78 @@ export function createPersonRepository(db: DatabaseClient) {
       const personIds = persons.map((p) => p.id);
       if (personIds.length === 0) return [];
 
-      const [relationshipsRes, workflowsRes] = await Promise.all([
-        traceQuery(
-          "relationship_states.by_person_ids",
-          () =>
-            db
-              .from("relationship_states")
-              .select(RELATIONSHIP_COLS)
-              .in("person_id", personIds),
-          (r) => rowCountFrom(r.data),
-        ),
-        traceQuery(
-          "workflows.active_by_person_ids",
-          () =>
-            db
-              .from("workflows")
-              .select(WORKFLOW_CRM_COLS)
-              .in("person_id", personIds)
-              .in("current_state", ["active", "waiting", "blocked"]),
-          (r) => rowCountFrom(r.data),
-        ),
-      ]);
+      const idChunks = chunkArray(personIds, LIST_CRM_ROWS_CHUNK_SIZE);
+      const relationshipRows: Record<string, unknown>[] = [];
+      const workflowRows: Record<string, unknown>[] = [];
 
-      if (relationshipsRes.error) {
-        throw new Error(
-          `PersonRepository.listCrmRows: ${relationshipsRes.error.message}`,
-        );
-      }
-      if (workflowsRes.error) {
-        throw new Error(
-          `PersonRepository.listCrmRows: ${workflowsRes.error.message}`,
-        );
+      for (let i = 0; i < idChunks.length; i++) {
+        const chunk = idChunks[i]!;
+        const [relationshipsRes, workflowsRes] = await Promise.all([
+          traceQuery(
+            "relationship_states.by_person_ids",
+            () =>
+              db
+                .from("relationship_states")
+                .select(RELATIONSHIP_COLS)
+                .in("person_id", chunk),
+            (r) => rowCountFrom(r.data),
+          ),
+          traceQuery(
+            "workflows.active_by_person_ids",
+            () =>
+              db
+                .from("workflows")
+                .select(WORKFLOW_CRM_COLS)
+                .in("person_id", chunk)
+                .in("current_state", ["active", "waiting", "blocked"]),
+            (r) => rowCountFrom(r.data),
+          ),
+        ]);
+
+        if (relationshipsRes.error) {
+          logPersonRepoFetchError(
+            "relationship_states.by_person_ids",
+            i,
+            idChunks.length,
+            chunk.length,
+            relationshipsRes.error,
+          );
+          throw new Error(
+            `PersonRepository.listCrmRows: ${relationshipsRes.error.message}`,
+          );
+        }
+        if (workflowsRes.error) {
+          logPersonRepoFetchError(
+            "workflows.active_by_person_ids",
+            i,
+            idChunks.length,
+            chunk.length,
+            workflowsRes.error,
+          );
+          throw new Error(
+            `PersonRepository.listCrmRows: ${workflowsRes.error.message}`,
+          );
+        }
+
+        for (const row of relationshipsRes.data ?? []) {
+          relationshipRows.push(row as Record<string, unknown>);
+        }
+        for (const row of workflowsRes.data ?? []) {
+          workflowRows.push(row as Record<string, unknown>);
+        }
       }
 
       const relByPerson = new Map<string, RelationshipState>();
-      for (const row of relationshipsRes.data ?? []) {
+      for (const row of relationshipRows) {
         relByPerson.set(
           String(row.person_id),
-          mapRelationship(row as Record<string, unknown>),
+          mapRelationship(row),
         );
       }
 
       const wfByPerson = new Map<string, Workflow>();
-      for (const row of workflowsRes.data ?? []) {
-        const wf = mapWorkflow(row as Record<string, unknown>);
+      for (const row of workflowRows) {
+        const wf = mapWorkflow(row);
         const prev = wfByPerson.get(wf.person_id);
         if (!prev || wf.priority > prev.priority) {
           wfByPerson.set(wf.person_id, wf);

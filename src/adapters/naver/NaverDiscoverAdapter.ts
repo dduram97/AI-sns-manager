@@ -14,6 +14,11 @@ import {
   matchesExclude,
   type DiscoverPolicy,
 } from "../../domain/policy/discoverPolicy";
+import { NEIGHBOR_AD_PENALTY_KEYWORDS } from "../../domain/policy/neighborPolicy";
+import {
+  hasNaverSearchApiCredentials,
+  searchCandidatesViaNaverApi,
+} from "./naverBlogSearchApi";
 
 export interface DiscoverCandidate {
   blogName: string;
@@ -173,6 +178,57 @@ export class NaverDiscoverAdapter {
     const all: DiscoverCandidate[] = [];
     const seen = new Set<string>();
 
+    const mergeBatch = (batch: DiscoverCandidate[]) => {
+      for (const c of batch) {
+        if (seen.has(c.blogId)) continue;
+        seen.add(c.blogId);
+        all.push(c);
+      }
+    };
+
+    if (hasNaverSearchApiCredentials()) {
+      try {
+        const perKeyword = Math.max(
+          20,
+          Math.ceil(
+            policy.max_candidates_per_tick /
+              Math.max(1, policy.search_keywords.length),
+          ),
+        );
+        const api = await searchCandidatesViaNaverApi({
+          keywords: policy.search_keywords,
+          maxPerKeyword: perKeyword,
+          maxTotal: Math.max(policy.max_candidates_per_tick * 4, perKeyword),
+          sort: "sim",
+        });
+        const adKeywords = [...NEIGHBOR_AD_PENALTY_KEYWORDS];
+        const apiFiltered = api.candidates.filter((c) => {
+          const haystack = `${c.blogName} ${c.snippet} ${c.postTitle ?? ""}`;
+          if (matchesExclude(haystack, policy.exclude_keywords)) return false;
+          if (matchesExclude(haystack, adKeywords)) return false;
+          if (!c.recentlyActive) return false;
+          return true;
+        });
+        mergeBatch(apiFiltered);
+        if (api.errors.length > 0) {
+          console.warn(
+            "[NaverDiscoverAdapter] API keyword errors:",
+            api.errors,
+          );
+        }
+        if (apiFiltered.length > 0) {
+          console.log(
+            `[NaverDiscoverAdapter] API search added ${apiFiltered.length} candidates (raw ${api.rawItemCount})`,
+          );
+        }
+      } catch (err) {
+        console.warn(
+          "[NaverDiscoverAdapter] API search failed:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+
     for (const keyword of policy.search_keywords) {
       try {
         const batch = await withPage(
@@ -180,11 +236,7 @@ export class NaverDiscoverAdapter {
           `discover:${keyword}`,
           (page) => this.scrapeKeyword(page, keyword, policy),
         );
-        for (const c of batch) {
-          if (seen.has(c.blogId)) continue;
-          seen.add(c.blogId);
-          all.push(c);
-        }
+        mergeBatch(batch);
       } catch (err) {
         console.warn(
           `[NaverDiscoverAdapter] keyword=${keyword} failed:`,

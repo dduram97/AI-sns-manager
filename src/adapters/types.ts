@@ -1,3 +1,4 @@
+import type { ActionFailureDetail } from "../lib/actionFailure";
 import type {
   ActionJob,
   ActionType,
@@ -26,8 +27,17 @@ export type ChannelActionResult =
       outcome?: "executed" | "skipped" | "not_available" | "excluded";
       reasonCode?: string;
       reasonMessage?: string;
+      failedStep?: string;
+      steps?: string[];
+      detail?: Record<string, unknown>;
+      /** Merged into target_ref.execution_result on success */
+      executionResult?: Record<string, unknown>;
     }
-  | { ok: false; errorMessage: string };
+  | {
+      ok: false;
+      errorMessage: string;
+      failure?: ActionFailureDetail;
+    };
 
 /**
  * Channel Adapter contract (ARCHITECTURE_SPEC v2.0).

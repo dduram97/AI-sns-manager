@@ -1,4 +1,5 @@
 import type { DatabaseClient } from "../lib/supabase";
+import { mergeExecutionFailureIntoTargetRef } from "../lib/actionFailure";
 import { rowCountFrom, traceQuery } from "../lib/dbTrace";
 import {
   resolveAvailableModes,
@@ -934,11 +935,48 @@ export function createApprovalRepository(db: DatabaseClient) {
       );
     },
 
-    async markJobExecuted(jobId: string): Promise<ActionJob> {
+    async markJobExecuted(
+      jobId: string,
+      opts?: {
+        note?: string;
+        executionResult?: Record<string, unknown>;
+      },
+    ): Promise<ActionJob> {
+      const existing = await this.getActionJob(jobId);
+      const prev =
+        existing.target_ref &&
+        typeof existing.target_ref === "object" &&
+        !Array.isArray(existing.target_ref)
+          ? { ...(existing.target_ref as Record<string, unknown>) }
+          : {};
       const now = new Date().toISOString();
+      const extra = opts?.executionResult ?? {};
+      const target_ref = {
+        ...prev,
+        execution_result: {
+          outcome: "executed",
+          reason_code: "EXECUTED",
+          reason_message: opts?.note ?? "executed",
+          failed_step: "verify",
+          detail: {
+            note: opts?.note ?? null,
+            executed_at: now,
+            ...extra,
+          },
+          steps: Array.isArray(extra.steps)
+            ? extra.steps.filter((s): s is string => typeof s === "string")
+            : ["executed"],
+          ...extra,
+        },
+      };
       const { data, error } = await db
         .from("action_jobs")
-        .update({ status: "executed", executed_at: now, error: null })
+        .update({
+          status: "executed",
+          executed_at: now,
+          error: null,
+          target_ref,
+        })
         .eq("id", jobId)
         .select("*")
         .single();
@@ -963,6 +1001,7 @@ export function createApprovalRepository(db: DatabaseClient) {
         failedStep?: string;
         outcome?: string;
         detail?: Record<string, unknown>;
+        steps?: string[];
       },
     ): Promise<ActionJob> {
       const existing = await this.getActionJob(jobId);
@@ -972,6 +1011,7 @@ export function createApprovalRepository(db: DatabaseClient) {
         !Array.isArray(existing.target_ref)
           ? { ...(existing.target_ref as Record<string, unknown>) }
           : {};
+      const skippedAt = new Date().toISOString();
       const target_ref = {
         ...prev,
         execution_result: {
@@ -979,7 +1019,9 @@ export function createApprovalRepository(db: DatabaseClient) {
           reason_code: input.reasonCode,
           reason_message: input.reasonMessage,
           failed_step: input.failedStep ?? "unknown",
+          skipped_at: skippedAt,
           detail: input.detail,
+          steps: input.steps,
           failure_reason: {
             code: input.reasonCode,
             message: input.reasonMessage,
@@ -990,7 +1032,10 @@ export function createApprovalRepository(db: DatabaseClient) {
         .from("action_jobs")
         .update({
           status: input.status,
-          error: `[${input.reasonCode}] ${input.reasonMessage}`.slice(0, 2000),
+          error: `[${input.reasonCode}] ${input.reasonMessage} @${input.failedStep ?? "unknown"}`.slice(
+            0,
+            2000,
+          ),
           target_ref,
         })
         .eq("id", jobId)
@@ -1030,20 +1075,32 @@ export function createApprovalRepository(db: DatabaseClient) {
     async markJobFailed(
       jobId: string,
       errorMessage: string,
-      opts?: { errorCode?: string },
+      opts?: {
+        errorCode?: string;
+        failure?: import("../lib/actionFailure").ActionFailureDetail;
+      },
     ): Promise<ActionJob> {
       const job = await this.getActionJob(jobId);
       if (job.status === "permanently_failed") {
         return job;
       }
-      const prev = Number(job.target_ref?.retry_count ?? 0);
+      const prevRef =
+        job.target_ref &&
+        typeof job.target_ref === "object" &&
+        !Array.isArray(job.target_ref)
+          ? { ...(job.target_ref as Record<string, unknown>) }
+          : {};
+      const prev = Number(prevRef.retry_count ?? 0);
       const retry_count = Number.isFinite(prev) ? prev + 1 : 1;
-      const target_ref: Record<string, unknown> = {
-        ...job.target_ref,
+      let target_ref: Record<string, unknown> = {
+        ...prevRef,
         retry_count,
         last_failed_at: new Date().toISOString(),
       };
-      if (opts?.errorCode) {
+      if (opts?.failure) {
+        target_ref = mergeExecutionFailureIntoTargetRef(target_ref, opts.failure);
+        target_ref.retry_count = retry_count;
+      } else if (opts?.errorCode) {
         target_ref.error_code = opts.errorCode;
       }
       const { data, error } = await db
