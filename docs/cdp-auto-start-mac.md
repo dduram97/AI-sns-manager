@@ -16,7 +16,15 @@ AI SNS Manager는 Playwright가 **이미 실행 중인 Chrome**에 CDP로 붙습
 | 환경변수 | `USE_CDP=true`, `CDP_URL=http://127.0.0.1:9222` |
 | 연결 API | `chromium.connectOverCDP(CDP_URL)` (`BrowserSessionManager`) |
 | 프로필 | **기본 Chrome 프로필이 아닌** 별도 `--user-data-dir` |
-| 권장 프로필 경로 | `$HOME/chrome-cdp-profile` |
+| 권장 프로필 경로 | `$HOME/ai-sns-manager/chrome-profile` |
+| 실행 | `./scripts/start-cdp-chrome.sh` (기본 headless, 프로필 lock 처리) |
+
+로그인 세션이 필요하면 최초 1회만:
+
+```bash
+CDP_HEADLESS=0 ./scripts/start-cdp-chrome.sh
+# 네이버 로그인 후, 이후에는 기본(headless)으로 재기동
+```
 
 `.env` / `.env.example` 예시:
 

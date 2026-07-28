@@ -5,7 +5,12 @@ export type TodaySummaryViewModel = {
   };
   neighborRequest: {
     candidates: number;
+    /** Successful executed only */
     completed: number;
+    failed: number;
+    excluded: number;
+    dailyLimit: number;
+    remaining: number;
   };
   comment: {
     pending: number;

@@ -6,6 +6,17 @@
 
 import type { BrowserContext, Page } from "playwright";
 
+import {
+  failureToErrorColumn,
+  makeFailure,
+  type ActionFailureDetail,
+} from "../../jobs/actionFailure";
+import {
+  makeSkip,
+  skipToErrorColumn,
+  type ActionSkipDetail,
+} from "../../jobs/actionOutcome";
+
 export type NeighborTargetRef = Record<string, unknown> | null | undefined;
 
 export type NeighborExecuteInput = {
@@ -22,7 +33,56 @@ export type NeighborExecuteResult =
       alreadyNeighbor: boolean;
       alreadyPending: boolean;
     }
-  | { ok: false; jobId: string; error: string };
+  | {
+      ok: false;
+      jobId: string;
+      error: string;
+      failure: ActionFailureDetail;
+    }
+  | {
+      ok: "skipped";
+      jobId: string;
+      url: string;
+      skip: ActionSkipDetail;
+    };
+
+function failNeighbor(
+  jobId: string,
+  input: {
+    error_code: string;
+    error_message: string;
+    failed_step: string;
+    detail?: Record<string, unknown>;
+    steps?: string[];
+  },
+): Extract<NeighborExecuteResult, { ok: false }> {
+  const failure = makeFailure(input);
+  return {
+    ok: false,
+    jobId,
+    error: failureToErrorColumn(failure),
+    failure,
+  };
+}
+
+function skipNeighbor(
+  jobId: string,
+  url: string,
+  input: {
+    reason_code: string;
+    reason_message: string;
+    failed_step: string;
+    detail?: Record<string, unknown>;
+    steps?: string[];
+  },
+): Extract<NeighborExecuteResult, { ok: "skipped" }> {
+  return {
+    ok: "skipped",
+    jobId,
+    url,
+    skip: makeSkip({ outcome: "excluded", ...input }),
+  };
+}
 
 const DEFAULT_MESSAGE =
   "안녕하세요. 관심사가 비슷해 서로이웃 신청드립니다.";
@@ -40,6 +100,7 @@ const OPEN_BUDDY_SELECTORS = [
 
 const MUTUAL_RADIO_SELECTORS = [
   'input[type="radio"][value="1"]',
+  'label:has-text("서로이웃을 신청")',
   'label:has-text("서로이웃")',
   "#bothBuddyRadio",
 ];
@@ -164,9 +225,14 @@ export function resolveNeighborBlogUrl(
 ): string | null {
   const ref = targetRef ?? {};
   const blogId = resolveNeighborBlogId(ref);
-  const blogUrl = strRef(ref, "blog_url", "profile_url");
-  if (blogUrl) return toMBlogUrl(blogUrl);
   if (blogId) return `https://m.blog.naver.com/${blogId}`;
+
+  const blogUrl = strRef(ref, "blog_url", "profile_url");
+  if (blogUrl) {
+    const id = extractBlogIdFromUrl(blogUrl);
+    if (id) return `https://m.blog.naver.com/${id}`;
+    return toMBlogUrl(blogUrl);
+  }
 
   const postUrl = strRef(ref, "post_url", "url", "permalink");
   if (postUrl) {
@@ -195,6 +261,33 @@ export function resolveNeighborMessage(
 }
 
 type RelationProbe = "accepted" | "pending_request" | "can_request" | "unknown";
+
+type BuddyAddKind = "mutual" | "one_way_only" | "none";
+
+async function probeBuddyAddKind(page: Page): Promise<BuddyAddKind> {
+  return page.evaluate(`(() => {
+    function visible(el) {
+      if (!el) return false;
+      var s = window.getComputedStyle(el);
+      if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+      var r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    }
+    var hasMutual = false;
+    var hasOneWay = false;
+    var nodes = document.querySelectorAll('a, button');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (!visible(el)) continue;
+      var t = ((el.innerText || el.textContent || '') + '').replace(/\\s+/g, '');
+      if (t.indexOf('서로이웃추가') >= 0) hasMutual = true;
+      if (t.indexOf('이웃추가') >= 0 && t.indexOf('서로이웃') < 0) hasOneWay = true;
+    }
+    if (hasMutual) return 'mutual';
+    if (hasOneWay) return 'one_way_only';
+    return 'none';
+  })()`) as Promise<BuddyAddKind>;
+}
 
 async function probeRelation(page: Page): Promise<RelationProbe> {
   return page.evaluate(`(() => {
@@ -238,8 +331,25 @@ async function probeRelation(page: Page): Promise<RelationProbe> {
     if (hasUnbuddy) return 'accepted';
     if (hasCancelRequest && !hasAddBuddy) return 'pending_request';
     if (hasAddBuddy) return 'can_request';
+    var neighborOnlyBtn = false;
+    var allBtns = document.querySelectorAll('button, a');
+    for (var n = 0; n < allBtns.length; n++) {
+      var btn = allBtns[n];
+      if (!visible(btn)) continue;
+      var bt = ((btn.innerText || btn.textContent || '') + '').replace(/\\s+/g, '').trim();
+      if (bt === '이웃') { neighborOnlyBtn = true; break; }
+    }
+    if (neighborOnlyBtn && !hasAddBuddy) return 'accepted';
+    if (/\\d+명의\\s*이웃/.test(bodyText) && bodyText.indexOf('이웃추가') < 0 && bodyText.indexOf('서로이웃추가') < 0) {
+      return 'accepted';
+    }
     if (/서로이웃|이웃입니다|이미\\s*이웃/.test(bodyText) && !hasAddBuddy) {
       return 'accepted';
+    }
+    if (!hasAddBuddy && !hasCancelRequest && /이웃\\s*\\d+/.test(bodyText)) {
+      if (/이웃삭제|서로이웃\\s*끊|이웃\\s*취소|이웃관리/.test(bodyText)) {
+        return 'accepted';
+      }
     }
     return 'unknown';
   })()`) as Promise<RelationProbe>;
@@ -329,11 +439,75 @@ const DISCOVER_OPEN_SOURCE = `(() => {
   return { score: bestScore, xpath: xpathOf(best), text: ((best.innerText || '') + '').slice(0, 40) };
 })()`;
 
-async function openBuddyForm(page: Page): Promise<"classic" | "discover" | null> {
+async function probeMutualOptionInForm(page: Page): Promise<boolean> {
+  await page
+    .locator('label:has-text("서로이웃"), label:has-text("이웃으로 추가")')
+    .first()
+    .waitFor({ state: "attached", timeout: 8_000 })
+    .catch(() => undefined);
+  return page.evaluate(`(() => {
+    var body = ((document.body && document.body.innerText) || '');
+    if (/서로이웃을\\s*신청|서로이웃추가/.test(body)) return true;
+    var nodes = document.querySelectorAll('label, input[type="radio"]');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var t = ((el.innerText || el.textContent || el.value || '') + '');
+      if (/서로이웃/.test(t)) return true;
+    }
+    return false;
+  })()`) as Promise<boolean>;
+}
+
+async function gotoBuddyAddForm(
+  page: Page,
+  blogId: string,
+  budgetMs: number,
+): Promise<boolean> {
+  const formUrl = `https://m.blog.naver.com/BuddyAddForm.naver?blogId=${encodeURIComponent(
+    blogId,
+  )}`;
+  const navMs = navTimeoutMs(budgetMs);
+  try {
+    await withTimeout(
+      page.goto(formUrl, { waitUntil: "domcontentloaded", timeout: navMs }),
+      navMs + 2_000,
+      "buddy_form_goto",
+    );
+    await sleep(900);
+    return /BuddyAddForm|buddyadd/i.test(page.url());
+  } catch (err) {
+    console.warn(
+      `[worker] neighbor_request buddy_form_goto_failed blogId=${blogId} ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return false;
+  }
+}
+
+async function openBuddyForm(
+  page: Page,
+  blogId: string | null,
+  budgetMs: number,
+): Promise<"classic" | "discover" | "direct" | null> {
+  if (blogId) {
+    const ok = await gotoBuddyAddForm(page, blogId, budgetMs);
+    if (ok) {
+      console.info(
+        `[worker] neighbor_request open direct BuddyAddForm blogId=${blogId}`,
+      );
+      return "direct";
+    }
+  }
+
   console.info("[worker] neighbor_request step=open_classic");
   const classic = await clickFirstLocator(page, OPEN_BUDDY_SELECTORS);
   if (classic) {
     console.info(`[worker] neighbor_request open classic=${classic}`);
+    await page
+      .waitForURL(/BuddyAddForm|buddyadd/i, { timeout: 12_000 })
+      .catch(() => undefined);
+    await sleep(900);
     return "classic";
   }
 
@@ -351,6 +525,10 @@ async function openBuddyForm(page: Page): Promise<"classic" | "discover" | null>
     console.info(
       `[worker] neighbor_request open discover score=${found.score} text=${found.text}`,
     );
+    await page
+      .waitForURL(/BuddyAddForm|buddyadd/i, { timeout: 12_000 })
+      .catch(() => undefined);
+    await sleep(900);
     return "discover";
   }
 
@@ -361,6 +539,10 @@ async function openBuddyForm(page: Page): Promise<"classic" | "discover" | null>
       console.info(
         `[worker] neighbor_request open discover xpath text=${found.text}`,
       );
+      await page
+        .waitForURL(/BuddyAddForm|buddyadd/i, { timeout: 12_000 })
+        .catch(() => undefined);
+      await sleep(900);
       return "discover";
     }
   }
@@ -428,22 +610,18 @@ async function fillAndConfirm(page: Page, message: string): Promise<boolean> {
   return true;
 }
 
-async function verifyAfterSubmit(page: Page): Promise<{
-  ok: boolean;
-  detail: string;
-}> {
-  await sleep(1_200);
-  const relation = await probeRelation(page);
+/**
+ * Pure verify interpreter — success only when relation clearly changed
+ * to pending_request / accepted (or explicit success copy).
+ */
+export function interpretNeighborVerify(input: {
+  relation: RelationProbe;
+  bodyText: string;
+}): { ok: true; detail: string } | { ok: false; detail: string; error_code: string } {
+  const { relation, bodyText } = input;
   if (relation === "pending_request" || relation === "accepted") {
     return { ok: true, detail: `relation=${relation}` };
   }
-
-  const bodyText = (
-    (await page.locator("body").innerText().catch(() => "")) || ""
-  )
-    .replace(/\s+/g, " ")
-    .trim();
-
   if (/신청\s*(이\s*)?완료|신청했습니다|전송했습니다|접수/.test(bodyText)) {
     return { ok: true, detail: "success_copy" };
   }
@@ -451,11 +629,39 @@ async function verifyAfterSubmit(page: Page): Promise<{
     return { ok: true, detail: "already_neighbor_copy" };
   }
   if (/로그인|본인인증|차단|하루\s*제한|신청\s*불가|오류/.test(bodyText)) {
-    return { ok: false, detail: "blocked_or_error_ui" };
+    return {
+      ok: false,
+      detail: "blocked_or_error_ui",
+      error_code: "REQUEST_NOT_AVAILABLE",
+    };
   }
+  if (/서로이웃\s*(신청\s*)?불가|서로이웃이\s*불가|이웃만\s*가능/.test(bodyText)) {
+    return {
+      ok: false,
+      detail: "mutual_not_available_copy",
+      error_code: "NEIGHBOR_MUTUAL_NOT_AVAILABLE",
+    };
+  }
+  return {
+    ok: false,
+    detail: `relation_unchanged=${relation}`,
+    error_code: "VERIFY_FAILED",
+  };
+}
 
-  // Soft-pass: confirm was clicked and no hard error — UI varies after submit.
-  return { ok: true, detail: `soft_pass relation=${relation}` };
+async function verifyAfterSubmit(page: Page): Promise<{
+  ok: boolean;
+  detail: string;
+  error_code?: string;
+}> {
+  await sleep(1_200);
+  const relation = await probeRelation(page);
+  const bodyText = (
+    (await page.locator("body").innerText().catch(() => "")) || ""
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+  return interpretNeighborVerify({ relation, bodyText });
 }
 
 async function runNeighborOnPage(
@@ -465,6 +671,7 @@ async function runNeighborOnPage(
   message: string,
   budgetMs: number,
 ): Promise<NeighborExecuteResult> {
+  const steps: string[] = ["page_loaded"];
   const navMs = navTimeoutMs(budgetMs);
   console.info(
     `[worker] neighbor_request step=goto_begin job=${jobId} url=${pageUrl} timeoutMs=${navMs}`,
@@ -481,85 +688,267 @@ async function runNeighborOnPage(
     console.error(
       `[worker] neighbor_request step=goto_failed job=${jobId} error=${messageErr}`,
     );
-    return { ok: false, jobId, error: `goto failed: ${messageErr}` };
+    steps.push("goto");
+    return failNeighbor(jobId, {
+      error_code: "GOTO_FAILED",
+      error_message: `페이지 이동 실패: ${messageErr}`,
+      failed_step: "goto",
+      steps,
+      detail: { url: pageUrl },
+    });
   }
 
+  steps.push("page_loaded");
   console.info(
     `[worker] neighbor_request step=goto_done job=${jobId} url=${page.url()}`,
   );
   await sleep(1_200);
 
+  steps.push("relation_detect");
   const before = await probeRelation(page);
   console.info(
     `[worker] neighbor_request relation_before=${before} job=${jobId}`,
   );
+  const blogId = extractBlogIdFromUrl(pageUrl) ?? extractBlogIdFromUrl(page.url());
 
   if (before === "accepted") {
     console.info(
-      `[worker] neighbor_request already_neighbor job=${jobId} → success`,
+      `[worker] neighbor_request already_neighbor job=${jobId} → excluded`,
     );
-    return {
-      ok: true,
-      jobId,
-      url: pageUrl,
-      alreadyNeighbor: true,
-      alreadyPending: false,
-    };
+    return skipNeighbor(jobId, pageUrl, {
+      reason_code: "ALREADY_NEIGHBOR",
+      reason_message: "이미 이웃인 블로그입니다.",
+      failed_step: "relation_detect",
+      steps,
+      detail: { url: pageUrl, relation: before },
+    });
   }
 
   if (before === "pending_request") {
     console.info(
-      `[worker] neighbor_request already_pending job=${jobId} → success`,
+      `[worker] neighbor_request already_pending job=${jobId} → excluded`,
     );
-    return {
-      ok: true,
-      jobId,
-      url: pageUrl,
-      alreadyNeighbor: false,
-      alreadyPending: true,
-    };
+    return skipNeighbor(jobId, pageUrl, {
+      reason_code: "ALREADY_PENDING",
+      reason_message: "이미 서로이웃 신청 중인 블로그입니다",
+      failed_step: "relation_detect",
+      steps,
+      detail: { url: pageUrl, relation: before },
+    });
   }
 
-  const opened = await openBuddyForm(page);
-  if (!opened) {
-    // Re-probe — UI may not expose add button when already neighbor.
+  steps.push("button_search");
+  const buddyKind = await probeBuddyAddKind(page);
+  console.info(
+    `[worker] neighbor_request buddy_add_kind=${buddyKind} job=${jobId}`,
+  );
+
+  let formAlreadyOpen = false;
+  if (buddyKind === "one_way_only") {
+    const openedProbe = await openBuddyForm(page, blogId, budgetMs);
+    steps.push("open_buddy_probe");
+    if (!openedProbe) {
+      return skipNeighbor(jobId, pageUrl, {
+        reason_code: "NEIGHBOR_BUTTON_NOT_AVAILABLE",
+        reason_message: "서로이웃 신청 버튼 없음",
+        failed_step: "button_search",
+        steps,
+        detail: { url: pageUrl, current_url: page.url(), buddy_add_kind: buddyKind },
+      });
+    }
+    formAlreadyOpen = true;
+    const mutualInForm = await probeMutualOptionInForm(page);
+    console.info(
+      `[worker] neighbor_request mutual_in_form=${mutualInForm} job=${jobId}`,
+    );
+    if (!mutualInForm) {
+      return skipNeighbor(jobId, pageUrl, {
+        reason_code: "NEIGHBOR_MUTUAL_NOT_AVAILABLE",
+        reason_message: "서로이웃이 불가한 블로그입니다.",
+        failed_step: "button_search",
+        steps,
+        detail: {
+          url: pageUrl,
+          current_url: page.url(),
+          buddy_add_kind: buddyKind,
+          failure_reason: {
+            code: "NEIGHBOR_MUTUAL_NOT_AVAILABLE",
+            message: "서로이웃이 불가한 블로그입니다.",
+          },
+        },
+      });
+    }
+  }
+  if (buddyKind === "none") {
     const again = await probeRelation(page);
     if (again === "accepted") {
-      console.info(
-        `[worker] neighbor_request already_neighbor_after_probe job=${jobId}`,
-      );
-      return {
-        ok: true,
-        jobId,
-        url: pageUrl,
-        alreadyNeighbor: true,
-        alreadyPending: false,
-      };
+      return skipNeighbor(jobId, pageUrl, {
+        reason_code: "ALREADY_NEIGHBOR",
+        reason_message: "이미 이웃인 블로그입니다.",
+        failed_step: "button_search",
+        steps,
+        detail: { url: pageUrl, relation: again },
+      });
     }
-    const err = "Neighbor request button not found";
-    console.error(`[worker] neighbor_request failed job=${jobId} reason=${err}`);
-    return { ok: false, jobId, error: err };
+    if (again === "pending_request") {
+      return skipNeighbor(jobId, pageUrl, {
+        reason_code: "ALREADY_PENDING",
+        reason_message: "이미 서로이웃 신청 중인 블로그입니다.",
+        failed_step: "button_search",
+        steps,
+        detail: { url: pageUrl, relation: again },
+      });
+    }
+    console.info(
+      `[worker] neighbor_request excluded job=${jobId} reason=NEIGHBOR_BUTTON_NOT_AVAILABLE`,
+    );
+    let pageTitle = "";
+    try {
+      pageTitle = await page.title();
+    } catch {
+      pageTitle = "";
+    }
+    return skipNeighbor(jobId, pageUrl, {
+      reason_code: "NEIGHBOR_BUTTON_NOT_AVAILABLE",
+      reason_message: "서로이웃 신청 버튼 없음",
+      failed_step: "button_search",
+      steps,
+      detail: {
+        url: pageUrl,
+        current_url: page.url(),
+        page_title: pageTitle,
+        relation_before: before,
+        relation_after_probe: again,
+      },
+    });
   }
 
+  const opened = formAlreadyOpen
+    ? "direct"
+    : await openBuddyForm(page, blogId, budgetMs);
+  steps.push(
+    opened === "classic" || opened === "direct"
+      ? "button_click"
+      : opened === "discover"
+        ? "button_click"
+        : "button_search",
+  );
+  if (!opened) {
+    return skipNeighbor(jobId, pageUrl, {
+      reason_code: "NEIGHBOR_BUTTON_NOT_AVAILABLE",
+      reason_message: "서로이웃 신청 버튼 없음",
+      failed_step: "button_search",
+      steps,
+      detail: { url: pageUrl, current_url: page.url() },
+    });
+  }
+
+  steps.push("modal_open");
   console.info(`[worker] neighbor_request step=submit_begin job=${jobId}`);
+  steps.push("option_select", "fill_message");
   const confirmed = await fillAndConfirm(page, message);
+  steps.push("confirm_click");
   if (!confirmed) {
-    const err = "Neighbor request confirm button not found";
-    console.error(`[worker] neighbor_request failed job=${jobId} reason=${err}`);
-    return { ok: false, jobId, error: err };
+    console.error(
+      `[worker] neighbor_request failed job=${jobId} reason=confirm_not_found`,
+    );
+    return failNeighbor(jobId, {
+      error_code: "NEIGHBOR_CONFIRM_NOT_FOUND",
+      error_message: "서로이웃 신청 확인 버튼을 찾지 못했습니다",
+      failed_step: "confirm_click",
+      steps,
+      detail: { url: pageUrl, current_url: page.url() },
+    });
   }
   console.info(`[worker] neighbor_request step=submit_clicked job=${jobId}`);
+  steps.push("confirm_click");
 
   const verified = await verifyAfterSubmit(page);
+  steps.push("verify");
   console.info(
     `[worker] neighbor_request verify job=${jobId} ok=${verified.ok} detail=${verified.detail}`,
   );
   if (!verified.ok) {
-    return {
-      ok: false,
-      jobId,
-      error: `neighbor_request verify failed: ${verified.detail}`,
-    };
+    const code = verified.error_code ?? "VERIFY_FAILED";
+    const bodyAfter = (
+      (await page.locator("body").innerText().catch(() => "")) || ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+    const stuckOnForm = /BuddyAddForm|buddyadd/i.test(page.url());
+    const mutualBlocked =
+      code === "NEIGHBOR_MUTUAL_NOT_AVAILABLE" ||
+      /서로이웃\s*(신청\s*)?불가|서로이웃이\s*불가|이웃만\s*가능/.test(
+        bodyAfter,
+      );
+    if (mutualBlocked || (stuckOnForm && code === "VERIFY_FAILED")) {
+      return skipNeighbor(jobId, pageUrl, {
+        reason_code: "NEIGHBOR_MUTUAL_NOT_AVAILABLE",
+        reason_message: "서로이웃이 불가한 블로그입니다.",
+        failed_step: "verify",
+        steps,
+        detail: {
+          url: pageUrl,
+          current_url: page.url(),
+          verify_detail: verified.detail,
+          failure_reason: {
+            code: "NEIGHBOR_MUTUAL_NOT_AVAILABLE",
+            message: "서로이웃이 불가한 블로그입니다.",
+          },
+        },
+      });
+    }
+    if (code === "REQUEST_NOT_AVAILABLE") {
+      return skipNeighbor(jobId, pageUrl, {
+        reason_code: "REQUEST_NOT_AVAILABLE",
+        reason_message: "서로이웃 신청이 불가능한 상태입니다",
+        failed_step: "verify",
+        steps,
+        detail: {
+          url: pageUrl,
+          current_url: page.url(),
+          verify_detail: verified.detail,
+        },
+      });
+    }
+    if (code === "NEIGHBOR_MUTUAL_NOT_AVAILABLE") {
+      return skipNeighbor(jobId, pageUrl, {
+        reason_code: "NEIGHBOR_MUTUAL_NOT_AVAILABLE",
+        reason_message: "서로이웃이 불가한 블로그입니다.",
+        failed_step: "verify",
+        steps,
+        detail: {
+          url: pageUrl,
+          current_url: page.url(),
+          verify_detail: verified.detail,
+          failure_reason: {
+            code: "NEIGHBOR_MUTUAL_NOT_AVAILABLE",
+            message: "서로이웃이 불가한 블로그입니다.",
+          },
+        },
+      });
+    }
+    return failNeighbor(jobId, {
+      error_code: code,
+      error_message: `서로이웃 신청 검증 실패: ${verified.detail}`,
+      failed_step: "verify",
+      steps,
+      detail: {
+        url: pageUrl,
+        current_url: page.url(),
+        verify_detail: verified.detail,
+      },
+    });
+  }
+
+  if (verified.detail === "already_neighbor_copy") {
+    return skipNeighbor(jobId, pageUrl, {
+      reason_code: "ALREADY_NEIGHBOR",
+      reason_message: "이미 이웃인 블로그입니다.",
+      failed_step: "verify",
+      steps,
+      detail: { url: pageUrl, verify_detail: verified.detail },
+    });
   }
 
   console.info(
@@ -569,7 +958,8 @@ async function runNeighborOnPage(
     ok: true,
     jobId,
     url: pageUrl,
-    alreadyNeighbor: verified.detail.includes("accepted") ||
+    alreadyNeighbor:
+      verified.detail.includes("accepted") ||
       verified.detail === "already_neighbor_copy",
     alreadyPending: verified.detail.includes("pending"),
   };
@@ -585,11 +975,12 @@ export async function executeNeighborRequest(
     console.error(
       `[worker] neighbor_request skip job=${jobId} reason=missing_blog_url`,
     );
-    return {
-      ok: false,
-      jobId,
-      error: "neighbor_request: target_ref needs blog_id or blog_url",
-    };
+    return failNeighbor(jobId, {
+      error_code: "MISSING_BLOG_URL",
+      error_message: "target_ref에 blog_id 또는 blog_url이 없습니다",
+      failed_step: "visit_start",
+      detail: {},
+    });
   }
 
   const message = resolveNeighborMessage(draftBody, targetRef);
@@ -612,7 +1003,13 @@ export async function executeNeighborRequest(
     console.error(
       `[worker] neighbor_request failed job=${jobId} error=${messageErr}`,
     );
-    return { ok: false, jobId, error: messageErr };
+    const isTimeout = /timeout/i.test(messageErr);
+    return failNeighbor(jobId, {
+      error_code: isTimeout ? "TIMEOUT" : "UNKNOWN",
+      error_message: messageErr,
+      failed_step: isTimeout ? "verify" : "unknown",
+      detail: { url: pageUrl },
+    });
   } finally {
     if (page) {
       console.info(`[worker] neighbor_request step=page_close job=${jobId}`);

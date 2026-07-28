@@ -216,16 +216,60 @@ export async function countNeighborExecutedToday(): Promise<number> {
   return count ?? 0;
 }
 
+/** Failed neighbor_request jobs today (excluded from success/quota used). */
+export async function countNeighborFailedToday(): Promise<number> {
+  const db = createServiceClient();
+  const since = startOfKstDayIso();
+  const { count, error } = await traceQuery(
+    "action_jobs.neighbor_failed_today",
+    () =>
+      db
+        .from("action_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("action_type", "neighbor_request")
+        .in("status", ["failed", "permanently_failed"])
+        .gte("updated_at", since),
+    (r) => rowCountFrom(null, r.count),
+  );
+  if (error) throw new Error(`countNeighborFailedToday: ${error.message}`);
+  return count ?? 0;
+}
+
+/** Soft-excluded neighbor_request today (button missing / already neighbor, etc.). */
+export async function countNeighborExcludedToday(): Promise<number> {
+  const db = createServiceClient();
+  const since = startOfKstDayIso();
+  const { count, error } = await traceQuery(
+    "action_jobs.neighbor_excluded_today",
+    () =>
+      db
+        .from("action_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("action_type", "neighbor_request")
+        .in("status", ["excluded", "skipped"])
+        .gte("updated_at", since),
+    (r) => rowCountFrom(null, r.count),
+  );
+  if (error) throw new Error(`countNeighborExcludedToday: ${error.message}`);
+  return count ?? 0;
+}
+
 export async function getNeighborSettings(): Promise<NeighborSettingsView> {
   const repos = createSupervisorRepos(createServiceClient());
   const policy = await repos.policy.get();
   const np = getNeighborPolicy(policy);
   const daily_request_limit = getNeighborDailyLimit(policy);
-  const today_executed = await countNeighborExecutedToday();
+  const [today_executed, today_failed, today_excluded] = await Promise.all([
+    countNeighborExecutedToday(),
+    countNeighborFailedToday(),
+    countNeighborExcludedToday(),
+  ]);
   return {
     ...np,
     daily_request_limit,
     today_executed,
+    today_failed,
+    today_excluded,
     today_remaining: Math.max(0, daily_request_limit - today_executed),
   };
 }
@@ -456,7 +500,7 @@ export async function loadNeighborPageData(opts?: {
   return runWithDbTrace("neighbors", async () => {
     const repos = createSupervisorRepos(createServiceClient());
 
-    const [policy, excluded, already, openPersons, rows, today_executed] =
+    const [policy, excluded, already, openPersons, rows, today_executed, today_failed, today_excluded] =
       await Promise.all([
         traceQuery("policy.get", () => repos.policy.get(), () => 1),
         repos.neighborExclusion.list(),
@@ -464,6 +508,8 @@ export async function loadNeighborPageData(opts?: {
         openNeighborApprovalPersonIds(repos),
         repos.person.listCrmRows(),
         countNeighborExecutedToday(),
+        countNeighborFailedToday(),
+        countNeighborExcludedToday(),
       ]);
 
     const np = getNeighborPolicy(policy);
@@ -472,6 +518,8 @@ export async function loadNeighborPageData(opts?: {
       ...np,
       daily_request_limit,
       today_executed,
+      today_failed,
+      today_excluded,
       today_remaining: Math.max(0, daily_request_limit - today_executed),
     };
 

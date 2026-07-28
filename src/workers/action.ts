@@ -28,6 +28,7 @@ function toPort(repos: Repositories): ActionExecutionPort {
     markJobRunning: (jobId) => repos.markActionRunning(jobId),
     markJobExecuted: (jobId) => repos.markActionExecuted(jobId),
     markJobFailed: (jobId, message) => repos.markActionFailed(jobId, message),
+    markJobSkipped: (jobId, input) => repos.markActionSkipped(jobId, input),
     updateRelationship: (personId, patch) =>
       repos.updateRelationship(personId, patch),
     updateWorkflow: (workflowId, patch) =>

@@ -5,6 +5,13 @@
 
 import type { BrowserContext, Frame, Page } from "playwright";
 
+import {
+  failureToErrorColumn,
+  makeFailure,
+  type ActionFailureDetail,
+} from "../../jobs/actionFailure";
+import { makeSkip, skipToErrorColumn, type ActionSkipDetail } from "../../jobs/actionOutcome";
+
 export type LikeTargetRef = Record<string, unknown> | null | undefined;
 
 export type LikeExecuteInput = {
@@ -19,7 +26,53 @@ export type LikeExecuteResult =
       url: string;
       alreadyLiked: boolean;
     }
-  | { ok: false; jobId: string; error: string };
+  | {
+      ok: false;
+      jobId: string;
+      error: string;
+      failure: ActionFailureDetail;
+    }
+  | {
+      ok: "skipped";
+      jobId: string;
+      url: string;
+      skip: ActionSkipDetail;
+    };
+
+function failLike(
+  jobId: string,
+  input: {
+    error_code: string;
+    error_message: string;
+    failed_step: string;
+    detail?: Record<string, unknown>;
+    steps?: string[];
+  },
+): Extract<LikeExecuteResult, { ok: false }> {
+  const failure = makeFailure(input);
+  return {
+    ok: false,
+    jobId,
+    error: failureToErrorColumn(failure),
+    failure,
+  };
+}
+
+function skipLike(
+  jobId: string,
+  url: string,
+  input: {
+    outcome?: "skipped" | "not_available";
+    reason_code: string;
+    reason_message: string;
+    failed_step: string;
+    detail?: Record<string, unknown>;
+    steps?: string[];
+  },
+): Extract<LikeExecuteResult, { ok: "skipped" }> {
+  const skip = makeSkip(input);
+  return { ok: "skipped", jobId, url, skip };
+}
 
 /** Legacy / known Naver selectors — kept as first probe. */
 const LIKE_SELECTORS = [
@@ -242,6 +295,9 @@ const DISCOVER_LIKE_SOURCE = `(() => {
     var data = dataDump(el);
     var blob = (text + ' ' + aria + ' ' + title + ' ' + cls + ' ' + href + ' ' + data).toLowerCase();
     var score = 0;
+    if (/splugin|naver-splugin|share|공유|spic-cid/.test(blob)) score -= 120;
+    if (/likes__/.test(cls) && el.tagName.toLowerCase() === 'span') score -= 100;
+    if (el.tagName.toLowerCase() === 'span' && el.getAttribute('aria-pressed') == null && !/u_likeit|sympathy|likeit|_face/.test(cls)) score -= 60;
     if (/공감/.test(blob)) score += 50;
     if (/좋아요|like/.test(blob)) score += 40;
     if (/sympath|u_likeit|likeit|reaction|heart/.test(blob)) score += 45;
@@ -398,6 +454,26 @@ async function probeDiscoverAcrossRoots(
     };
   }
 
+  const cls = (best.className || "").toLowerCase();
+  const trustedDiscover =
+    best.score >= 70 &&
+    !/splugin|likes__/.test(cls) &&
+    (best.pressed != null ||
+      /u_likeit|sympathy|likeit|_face|_sympathy/.test(cls) ||
+      /u_likeit|sympathy|likeit/.test((best.dataAttrs || "").toLowerCase()));
+  if (!trustedDiscover) {
+    console.info(
+      `[worker] like discover rejected job=${jobId} score=${best.score} class=${best.className}`,
+    );
+    return {
+      state: "missing",
+      selector: null,
+      xpath: null,
+      frameUrl: null,
+      source: "discover",
+    };
+  }
+
   const state: LikeProbe["state"] =
     best.inferred === "on" ? "on" : best.inferred === "off" ? "off" : "off";
 
@@ -501,6 +577,7 @@ async function runLikeOnPage(
   url: string,
   budgetMs: number,
 ): Promise<LikeExecuteResult> {
+  const steps: string[] = ["visit_start"];
   const navMs = navTimeoutMs(budgetMs);
   page.setDefaultTimeout(Math.min(10_000, navMs));
   page.setDefaultNavigationTimeout(navMs);
@@ -520,13 +597,17 @@ async function runLikeOnPage(
     console.error(
       `[worker] like step=goto_failed job=${jobId} error=${message}`,
     );
-    return {
-      ok: false,
-      jobId,
-      error: `goto failed (${navMs}ms): ${message}`.slice(0, 2000),
-    };
+    steps.push("goto");
+    return failLike(jobId, {
+      error_code: "GOTO_FAILED",
+      error_message: `페이지 이동 실패: ${message}`,
+      failed_step: "goto",
+      steps,
+      detail: { url },
+    });
   }
 
+  steps.push("goto", "post_loaded");
   console.info(`[worker] like step=goto_done job=${jobId} url=${page.url()}`);
 
   // Allow late widgets / iframes to mount
@@ -548,9 +629,9 @@ async function runLikeOnPage(
     console.info(`[worker] like frame url=${f.url().slice(0, 120)}`);
   }
 
+  steps.push("like_button_search");
   let probe = await probeClassicAcrossRoots(page, jobId);
   if (probe.state === "missing") {
-    // retry classic a few times then discover
     for (let i = 0; i < 4; i++) {
       await sleep(500);
       probe = await probeClassicAcrossRoots(page, jobId);
@@ -564,9 +645,25 @@ async function runLikeOnPage(
   }
 
   if (probe.state === "missing") {
-    const err = "like button not found after classic+discover (incl. iframes)";
-    console.error(`[worker] like failed job=${jobId} reason=${err}`);
-    return { ok: false, jobId, error: err };
+    console.info(
+      `[worker] like skipped job=${jobId} reason=LIKE_BUTTON_NOT_AVAILABLE`,
+    );
+    return skipLike(jobId, page.url() || url, {
+      outcome: "not_available",
+      reason_code: "LIKE_BUTTON_NOT_AVAILABLE",
+      reason_message: "공감 버튼이 없는 글입니다.",
+      failed_step: "button_search",
+      steps,
+      detail: {
+        url,
+        current_url: page.url(),
+        page_title: title,
+        failure_reason: {
+          code: "LIKE_BUTTON_NOT_AVAILABLE",
+          message: "공감 버튼이 없는 글입니다.",
+        },
+      },
+    });
   }
 
   if (probe.state === "on") {
@@ -578,20 +675,24 @@ async function runLikeOnPage(
   console.info(
     `[worker] like step=click_begin job=${jobId} source=${probe.source}`,
   );
+  steps.push("like_click");
   const clicked = await clickProbe(page, probe, jobId);
   if (!clicked.ok) {
     console.error(
       `[worker] like step=click_failed job=${jobId} error=${clicked.error}`,
     );
-    return {
-      ok: false,
-      jobId,
-      error: `click failed: ${clicked.error}`.slice(0, 2000),
-    };
+    return failLike(jobId, {
+      error_code: "CLICK_FAILED",
+      error_message: `공감 클릭 실패: ${clicked.error}`,
+      failed_step: "like_click",
+      steps,
+      detail: { url, current_url: page.url(), selector: probe.selector },
+    });
   }
   console.info(`[worker] like clicked job=${jobId}`);
   await sleep(1_000);
 
+  steps.push("verify");
   let after = await recheckState(page, probe);
   console.info(`[worker] like step=verify1 job=${jobId} state=${after}`);
   if (after !== "on") {
@@ -603,11 +704,14 @@ async function runLikeOnPage(
   }
 
   if (after !== "on") {
-    // Soft success if we clicked and discover no longer says clearly off —
-    // still fail closed for ops safety.
-    const err = "like click did not register (still not liked)";
-    console.error(`[worker] like failed job=${jobId} reason=${err}`);
-    return { ok: false, jobId, error: err };
+    console.error(`[worker] like failed job=${jobId} reason=verify`);
+    return failLike(jobId, {
+      error_code: "VERIFY_FAILED",
+      error_message: "공감 클릭 후 상태가 반영되지 않았습니다",
+      failed_step: "verify",
+      steps,
+      detail: { url, current_url: page.url(), state_after: after },
+    });
   }
 
   console.info(`[worker] like completed job=${jobId}`);
@@ -622,12 +726,12 @@ export async function executeLike(
   const url = resolveLikePostUrl(targetRef);
   if (!url) {
     console.error(`[worker] like skip job=${jobId} reason=missing_post_url`);
-    return {
-      ok: false,
-      jobId,
-      error:
-        "like: target_ref needs post_url/url or blog_id+log_no (post page required)",
-    };
+    return failLike(jobId, {
+      error_code: "MISSING_POST_URL",
+      error_message:
+        "target_ref에 post_url/url 또는 blog_id+log_no가 필요합니다",
+      failed_step: "visit_start",
+    });
   }
 
   const budgetMs = likeMaxMs();
@@ -648,7 +752,13 @@ export async function executeLike(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[worker] like failed job=${jobId} error=${message}`);
-    return { ok: false, jobId, error: message.slice(0, 2000) };
+    const isTimeout = /timeout/i.test(message);
+    return failLike(jobId, {
+      error_code: isTimeout ? "TIMEOUT" : "UNKNOWN",
+      error_message: message,
+      failed_step: isTimeout ? "verify" : "unknown",
+      detail: { url },
+    });
   } finally {
     const toClose = pageRef.current;
     if (toClose) {

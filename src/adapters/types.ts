@@ -17,7 +17,16 @@ export interface ChannelActionInput {
 }
 
 export type ChannelActionResult =
-  | { ok: true; externalRef?: string; skipped?: boolean }
+  | {
+      ok: true;
+      externalRef?: string;
+      /** Legacy: already-liked soft skip that still marked executed */
+      skipped?: boolean;
+      /** Ops exclusion — mark action_jobs.status = skipped | excluded */
+      outcome?: "executed" | "skipped" | "not_available" | "excluded";
+      reasonCode?: string;
+      reasonMessage?: string;
+    }
   | { ok: false; errorMessage: string };
 
 /**

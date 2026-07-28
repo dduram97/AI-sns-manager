@@ -27,6 +27,18 @@ import {
 import { executeVisit, resolveVisitUrl } from "../naver/actions/visit";
 import type { DatabaseClient } from "../lib/supabase";
 import {
+  classifyWorkerErrorText,
+  failureToErrorColumn,
+  mergeExecutionFailureIntoTargetRef,
+  type ActionFailureDetail,
+} from "./actionFailure";
+import {
+  mergeExecutionResultIntoTargetRef,
+  skipToErrorColumn,
+  statusForSkip,
+  type ActionSkipDetail,
+} from "./actionOutcome";
+import {
   filterExecutableJobs,
   isDryRun,
   logActionEvent,
@@ -79,7 +91,7 @@ export type JobRunPlan = {
 export type JobRunResult =
   | { ok: true; jobId: string; note: string }
   | { ok: false; jobId: string; skipped: true; reason: string }
-  | { ok: false; jobId: string; error: string };
+  | { ok: false; jobId: string; error: string; failure?: ActionFailureDetail };
 
 function isCdpWorkerActionType(v: string): v is CdpWorkerActionType {
   return (CDP_WORKER_ACTION_TYPES as readonly string[]).includes(v);
@@ -573,7 +585,7 @@ export async function runNeighborRequestActionJobs(
       draftBody: job.draft_body,
     });
 
-    if (result.ok) {
+    if (result.ok === true) {
       const note = result.alreadyNeighbor
         ? `neighbor_request already_neighbor ${result.url}`
         : result.alreadyPending
@@ -585,7 +597,6 @@ export async function runNeighborRequestActionJobs(
         note,
       });
       executed += 1;
-      // Phase 4-1: track request outcome (non-blocking)
       if (blogId) {
         await recordNeighborPerformanceOnExecute(db, {
           actionJobId: job.id,
@@ -608,11 +619,31 @@ export async function runNeighborRequestActionJobs(
           alreadyPending: result.alreadyPending,
         },
       });
+    } else if (result.ok === "skipped") {
+      await updateJobResult(db, {
+        ok: "skipped",
+        jobId: job.id,
+        skip: result.skip,
+        previousTargetRef: job.target_ref,
+      });
+      logActionEvent({
+        phase: "result",
+        jobId: job.id,
+        actionType: "neighbor_request",
+        blogId,
+        targetUrl: result.url,
+        result: "skipped",
+        skipReason: result.skip.reason_code,
+      });
     } else {
+      const failure =
+        result.failure ??
+        classifyWorkerErrorText(result.error, "neighbor_request");
       await updateJobResult(db, {
         ok: false,
         jobId: job.id,
-        error: result.error,
+        failure,
+        previousTargetRef: job.target_ref,
       });
       failed += 1;
       logActionEvent({
@@ -622,7 +653,11 @@ export async function runNeighborRequestActionJobs(
         blogId,
         targetUrl: blogUrl,
         result: "failed",
-        skipReason: result.error,
+        skipReason: failure.error_code,
+        extra: {
+          failed_step: failure.failed_step,
+          error_message: failure.error_message,
+        },
       });
     }
   }
@@ -661,15 +696,30 @@ export async function claimJobRunning(
 }
 
 /**
- * Persist execution result. Success → status `executed` (app schema).
+ * Persist execution result.
+ * - executed → success quota
+ * - skipped / excluded → no success quota, not a hard failure
+ * - failed → hard failure
  */
 export async function updateJobResult(
   db: DatabaseClient,
   result:
     | { ok: true; jobId: string; note?: string }
-    | { ok: false; jobId: string; error: string },
+    | {
+        ok: false;
+        jobId: string;
+        failure: ActionFailureDetail;
+        previousTargetRef?: Record<string, unknown> | null;
+        error?: string;
+      }
+    | {
+        ok: "skipped";
+        jobId: string;
+        skip: ActionSkipDetail;
+        previousTargetRef?: Record<string, unknown> | null;
+      },
 ): Promise<void> {
-  if (result.ok) {
+  if (result.ok === true) {
     const { error } = await db
       .from("action_jobs")
       .update({
@@ -684,11 +734,104 @@ export async function updateJobResult(
     return;
   }
 
+  if (result.ok === "skipped") {
+    let previous = result.previousTargetRef ?? null;
+    if (!previous) {
+      const { data } = await db
+        .from("action_jobs")
+        .select("target_ref")
+        .eq("id", result.jobId)
+        .maybeSingle();
+      previous = (data?.target_ref as Record<string, unknown> | null) ?? null;
+    }
+    const status = statusForSkip(result.skip);
+    const target_ref = mergeExecutionResultIntoTargetRef(previous, {
+      outcome: result.skip.outcome,
+      reason_code: result.skip.reason_code,
+      reason_message: result.skip.reason_message,
+      failed_step: result.skip.failed_step,
+      detail: result.skip.detail,
+      steps: result.skip.steps,
+      failure_reason: {
+        code: result.skip.reason_code,
+        message: result.skip.reason_message,
+      },
+    });
+    const { error } = await db
+      .from("action_jobs")
+      .update({
+        status,
+        error: skipToErrorColumn(result.skip),
+        target_ref,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", result.jobId)
+      .in("status", ["running", "planned", "approved"]);
+    if (error) throw new Error(`updateJobResult skipped: ${error.message}`);
+
+    // Persist candidate exclusion for neighbor soft-skips
+    if (status === "excluded") {
+      const urlCandidate =
+        typeof result.skip.detail?.url === "string"
+          ? result.skip.detail.url
+          : typeof previous?.blog_url === "string"
+            ? previous.blog_url
+            : "";
+      const blogId =
+        (typeof previous?.blog_id === "string" && previous.blog_id.trim()) ||
+        (typeof result.skip.detail?.blog_id === "string"
+          ? result.skip.detail.blog_id
+          : null) ||
+        (urlCandidate ? extractBlogIdFromUrl(urlCandidate) : null);
+      if (blogId) {
+        const { error: exErr } = await db.from("neighbor_exclusions").upsert(
+          {
+            blog_id: blogId,
+            blog_name:
+              typeof previous?.blog_name === "string"
+                ? previous.blog_name
+                : null,
+            blog_url: urlCandidate || null,
+            note: `[${result.skip.reason_code}] ${result.skip.reason_message}`,
+            excluded_at: new Date().toISOString(),
+          },
+          { onConflict: "blog_id" },
+        );
+        if (exErr) {
+          console.warn(
+            `[cdp-worker] neighbor_exclusions upsert failed: ${exErr.message}`,
+          );
+        } else {
+          console.info(
+            `[cdp-worker] candidate excluded blogId=${blogId} reason=${result.skip.reason_code}`,
+          );
+        }
+      }
+    }
+    return;
+  }
+
+  let previous = result.previousTargetRef ?? null;
+  if (!previous) {
+    const { data } = await db
+      .from("action_jobs")
+      .select("target_ref")
+      .eq("id", result.jobId)
+      .maybeSingle();
+    previous = (data?.target_ref as Record<string, unknown> | null) ?? null;
+  }
+
+  const failure =
+    result.failure ??
+    classifyWorkerErrorText(result.error ?? "unknown failure");
+  const target_ref = mergeExecutionFailureIntoTargetRef(previous, failure);
+
   const { error } = await db
     .from("action_jobs")
     .update({
       status: "failed",
-      error: result.error.slice(0, 2000),
+      error: failureToErrorColumn(failure),
+      target_ref,
       updated_at: new Date().toISOString(),
     })
     .eq("id", result.jobId)
@@ -804,10 +947,12 @@ export async function runVisitActionJobs(
         result: "executed",
       });
     } else {
+      const failure = classifyWorkerErrorText(visitResult.error, "visit");
       await updateJobResult(db, {
         ok: false,
         jobId: job.id,
-        error: visitResult.error,
+        failure,
+        previousTargetRef: job.target_ref,
       });
       failed += 1;
       logActionEvent({
@@ -816,7 +961,7 @@ export async function runVisitActionJobs(
         actionType: "visit",
         targetUrl,
         result: "failed",
-        skipReason: visitResult.error,
+        skipReason: failure.error_code,
       });
     }
   }
@@ -940,7 +1085,7 @@ export async function runLikeActionJobs(
       targetRef: job.target_ref,
     });
 
-    if (likeResult.ok) {
+    if (likeResult.ok === true) {
       await updateJobResult(db, {
         ok: true,
         jobId: job.id,
@@ -957,11 +1102,31 @@ export async function runLikeActionJobs(
         targetUrl: likeResult.url,
         result: likeResult.alreadyLiked ? "executed_already_liked" : "executed",
       });
+    } else if (likeResult.ok === "skipped") {
+      await updateJobResult(db, {
+        ok: "skipped",
+        jobId: job.id,
+        skip: likeResult.skip,
+        previousTargetRef: job.target_ref,
+      });
+      logActionEvent({
+        phase: "result",
+        jobId: job.id,
+        actionType: "like",
+        blogId,
+        targetUrl: likeResult.url,
+        result: "skipped",
+        skipReason: likeResult.skip.reason_code,
+      });
     } else {
+      const failure =
+        likeResult.failure ??
+        classifyWorkerErrorText(likeResult.error, "like");
       await updateJobResult(db, {
         ok: false,
         jobId: job.id,
-        error: likeResult.error,
+        failure,
+        previousTargetRef: job.target_ref,
       });
       failed += 1;
       logActionEvent({
@@ -971,7 +1136,11 @@ export async function runLikeActionJobs(
         blogId,
         targetUrl: postUrl,
         result: "failed",
-        skipReason: likeResult.error,
+        skipReason: failure.error_code,
+        extra: {
+          failed_step: failure.failed_step,
+          steps: failure.steps,
+        },
       });
     }
   }
@@ -1212,10 +1381,14 @@ export async function runCommentActionJobs(
         result: "executed",
       });
     } else {
+      const failure =
+        commentResult.failure ??
+        classifyWorkerErrorText(commentResult.error, "comment");
       await updateJobResult(db, {
         ok: false,
         jobId: job.id,
-        error: commentResult.error,
+        failure,
+        previousTargetRef: job.target_ref,
       });
       failed += 1;
       logActionEvent({
@@ -1225,7 +1398,11 @@ export async function runCommentActionJobs(
         blogId,
         targetUrl: postUrl,
         result: "failed",
-        skipReason: commentResult.error,
+        skipReason: failure.error_code,
+        extra: {
+          failed_step: failure.failed_step,
+          steps: failure.steps,
+        },
       });
     }
   }

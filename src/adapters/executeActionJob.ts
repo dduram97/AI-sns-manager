@@ -1,5 +1,5 @@
 /**
- * Post-adapter persistence: success / failure side effects + Live guards.
+ * Post-adapter persistence: success / failure / skip side effects + Live guards.
  * Keeps Repository structure; no Decision Engine change.
  */
 
@@ -34,6 +34,18 @@ export interface ActionExecutionPort {
   markJobRunning(jobId: string): Promise<ActionJob>;
   markJobExecuted(jobId: string): Promise<ActionJob>;
   markJobFailed(jobId: string, errorMessage: string): Promise<ActionJob>;
+  /** Soft skip / not_available / excluded — not counted as success or hard fail */
+  markJobSkipped?(
+    jobId: string,
+    input: {
+      status: "skipped" | "excluded";
+      reasonCode: string;
+      reasonMessage: string;
+      failedStep?: string;
+      outcome?: string;
+      detail?: Record<string, unknown>;
+    },
+  ): Promise<ActionJob>;
   updateRelationship(
     personId: string,
     patch: {
@@ -56,7 +68,7 @@ export interface ActionExecutionPort {
     person_id: string | null;
     action_job_id: string | null;
     decision_id: string | null;
-    kind: "executed" | "blocked";
+    kind: "executed" | "blocked" | "observed";
     summary: string;
   }): Promise<unknown>;
   incrementOutcomeCounters(deltas: {
@@ -76,7 +88,16 @@ export interface ActionExecutionPort {
 }
 
 export type ChannelExecuteOutcome =
-  | { ok: true; job: ActionJob }
+  | {
+      ok: true;
+      job: ActionJob;
+      /** Soft skip that still resolves approval as success (e.g. like button missing in both-mode) */
+      softSkipped?: boolean;
+      skipReasonCode?: string;
+      skipReasonMessage?: string;
+      /** Neighbor excluded — not success, not hard failure */
+      excluded?: boolean;
+    }
   | { ok: false; job: ActionJob; errorMessage: string };
 
 function touchPatchForJob(job: ActionJob, now: string) {
@@ -117,7 +138,6 @@ async function runPreflightGuards(
     (process.env.NAVER_ADAPTER_MODE ?? "live").toLowerCase() !== "mock" &&
     isReloginRequired(health)
   ) {
-    // Soft warn only when within short TTL — do not embed stale Playwright call logs forever
     console.warn(
       `[executeActionJob] session health=${health?.state} age-blocked briefly: ${health?.reason?.slice(0, 120) ?? "relogin"}`,
     );
@@ -134,6 +154,16 @@ async function runPreflightGuards(
   const repeat = guardRepeatTarget(job, recent);
   if (repeat) return repeat;
   return null;
+}
+
+function isSoftSkipOutcome(
+  outcome: string | undefined,
+): outcome is "skipped" | "not_available" | "excluded" {
+  return (
+    outcome === "skipped" ||
+    outcome === "not_available" ||
+    outcome === "excluded"
+  );
 }
 
 /**
@@ -218,6 +248,74 @@ export async function executeActionJob(
       result.errorMessage.slice(0, 200),
     );
     return { ok: false, job: failed, errorMessage: result.errorMessage };
+  }
+
+  // Soft skip: like button missing, neighbor button missing, etc.
+  if (isSoftSkipOutcome(result.outcome) && port.markJobSkipped) {
+    const status: "skipped" | "excluded" =
+      result.outcome === "excluded" ||
+      (job.action_type === "neighbor_request" &&
+        (result.reasonCode?.startsWith("NEIGHBOR_") ||
+          result.reasonCode === "ALREADY_NEIGHBOR" ||
+          result.reasonCode === "ALREADY_PENDING"))
+        ? "excluded"
+        : "skipped";
+    const reasonCode =
+      result.reasonCode ??
+      (job.action_type === "like"
+        ? "LIKE_BUTTON_NOT_AVAILABLE"
+        : "SKIPPED");
+    const reasonMessage =
+      result.reasonMessage ??
+      (job.action_type === "like"
+        ? "공감 버튼이 없는 글입니다."
+        : "실행 제외");
+    const skippedJob = await port.markJobSkipped(running.id, {
+      status,
+      reasonCode,
+      reasonMessage,
+      failedStep:
+        job.action_type === "like" ? "button_search" : "button_search",
+      outcome: result.outcome,
+    });
+    await port.updateWorkflow(job.parent_workflow_id, {
+      current_state: "active",
+      blocked_reason: null,
+      next_action: "none",
+    });
+    const isNeighborExcluded =
+      job.action_type === "neighbor_request" && status === "excluded";
+    await port.insertActivity({
+      workflow_id: job.parent_workflow_id,
+      person_id: job.person_id,
+      action_job_id: job.id,
+      decision_id: job.decision_id,
+      kind: isNeighborExcluded ? "observed" : "executed",
+      summary: isNeighborExcluded
+        ? `neighbor excluded · ${reasonMessage}`
+        : job.action_type === "like"
+          ? `like skipped · 공감 불가 (버튼 없음) · ${reasonCode}`
+          : `${job.action_type} ${status} · ${reasonCode}`,
+    });
+    appendExecutionLog({
+      at: new Date().toISOString(),
+      job_id: skippedJob.id,
+      action_type: skippedJob.action_type,
+      person_id: skippedJob.person_id,
+      status: status,
+      ok: true,
+      skipped: true,
+      mode: process.env.NAVER_ADAPTER_MODE ?? "live",
+    });
+    traceReturn("executeActionJob", status, reasonCode);
+    return {
+      ok: true,
+      job: skippedJob,
+      softSkipped: true,
+      excluded: isNeighborExcluded,
+      skipReasonCode: reasonCode,
+      skipReasonMessage: reasonMessage,
+    };
   }
 
   const executed = await applyChannelSuccess(port, running, {

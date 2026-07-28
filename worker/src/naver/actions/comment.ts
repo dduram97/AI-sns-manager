@@ -5,6 +5,11 @@
 
 import type { BrowserContext, Page } from "playwright";
 
+import {
+  failureToErrorColumn,
+  makeFailure,
+  type ActionFailureDetail,
+} from "../../jobs/actionFailure";
 import { resolveLikePostUrl, type LikeTargetRef } from "./like";
 
 export type CommentExecuteInput = {
@@ -15,7 +20,31 @@ export type CommentExecuteInput = {
 
 export type CommentExecuteResult =
   | { ok: true; jobId: string; url: string }
-  | { ok: false; jobId: string; error: string };
+  | {
+      ok: false;
+      jobId: string;
+      error: string;
+      failure: ActionFailureDetail;
+    };
+
+function failComment(
+  jobId: string,
+  input: {
+    error_code: string;
+    error_message: string;
+    failed_step: string;
+    detail?: Record<string, unknown>;
+    steps?: string[];
+  },
+): CommentExecuteResult {
+  const failure = makeFailure(input);
+  return {
+    ok: false,
+    jobId,
+    error: failureToErrorColumn(failure),
+    failure,
+  };
+}
 
 const COMMENT_INPUT_SELECTORS = [
   "#naverComment__write_textarea",
@@ -270,6 +299,7 @@ async function runCommentOnPage(
   body: string,
   budgetMs: number,
 ): Promise<CommentExecuteResult> {
+  const steps: string[] = ["visit_start"];
   const navMs = navTimeoutMs(budgetMs);
   page.setDefaultTimeout(Math.min(12_000, navMs));
   page.setDefaultNavigationTimeout(navMs);
@@ -287,12 +317,16 @@ async function runCommentOnPage(
     console.error(
       `[worker] comment step=goto_failed job=${jobId} error=${message}`,
     );
-    return {
-      ok: false,
-      jobId,
-      error: `goto failed (${navMs}ms): ${message}`.slice(0, 2000),
-    };
+    steps.push("goto");
+    return failComment(jobId, {
+      error_code: "GOTO_FAILED",
+      error_message: `페이지 이동 실패: ${message}`,
+      failed_step: "goto",
+      steps,
+      detail: { url: pageUrl },
+    });
   }
+  steps.push("goto", "post_loaded");
   console.info(
     `[worker] comment step=goto_done job=${jobId} url=${page.url()}`,
   );
@@ -304,38 +338,59 @@ async function runCommentOnPage(
   );
 
   try {
+    steps.push("comment_input_search");
     await focusAndFillComment(page, body);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(
       `[worker] comment step=input_failed job=${jobId} error=${message}`,
     );
-    return { ok: false, jobId, error: `input failed: ${message}`.slice(0, 2000) };
+    return failComment(jobId, {
+      error_code: "COMMENT_INPUT_NOT_FOUND",
+      error_message: `댓글 입력 실패: ${message}`,
+      failed_step: "comment_input_search",
+      steps,
+      detail: {
+        url: pageUrl,
+        current_url: page.url(),
+        page_title: title,
+      },
+    });
   }
 
   console.info(`[worker] comment step=submit_begin job=${jobId}`);
+  steps.push("comment_submit");
   const submitted = await clickSubmit(page);
   if (!submitted) {
-    const err = "comment submit button not found";
-    console.error(`[worker] comment failed job=${jobId} reason=${err}`);
-    return { ok: false, jobId, error: err };
+    console.error(`[worker] comment failed job=${jobId} reason=submit_missing`);
+    return failComment(jobId, {
+      error_code: "COMMENT_SUBMIT_NOT_FOUND",
+      error_message: "댓글 등록 버튼을 찾지 못했습니다",
+      failed_step: "comment_submit",
+      steps,
+      detail: { url: pageUrl, current_url: page.url(), page_title: title },
+    });
   }
   console.info(`[worker] comment step=submit_clicked job=${jobId}`);
   await sleep(800);
 
+  steps.push("verify");
   const ok = await verifyCommentSubmitted(page, body);
   if (!ok) {
-    // Soft check — Naver sometimes doesn't echo immediately; treat as success if submit clicked
-    // and input cleared / no obvious error toast.
     const errText = await page
       .locator("text=/로그인|오류|실패|작성할 수 없/")
       .first()
       .isVisible()
       .catch(() => false);
     if (errText) {
-      const err = "comment submit appears blocked (login/error UI)";
-      console.error(`[worker] comment failed job=${jobId} reason=${err}`);
-      return { ok: false, jobId, error: err };
+      console.error(`[worker] comment failed job=${jobId} reason=blocked`);
+      return failComment(jobId, {
+        error_code: "VERIFY_FAILED",
+        error_message: "댓글 등록이 차단된 것으로 보입니다 (로그인/오류 UI)",
+        failed_step: "verify",
+        steps,
+        detail: { url: pageUrl, current_url: page.url(), page_title: title },
+      });
     }
     console.info(
       `[worker] comment verify soft-pass job=${jobId} (submit clicked, echo not confirmed)`,
@@ -356,22 +411,21 @@ export async function executeComment(
   const body = resolveCommentBody(draftBody, targetRef);
   if (!body) {
     console.error(`[worker] comment skip job=${jobId} reason=missing_draft`);
-    return {
-      ok: false,
-      jobId,
-      error:
-        "comment: draft_body or target_ref.comment_text/draft/body required",
-    };
+    return failComment(jobId, {
+      error_code: "MISSING_DRAFT",
+      error_message: "draft_body 또는 target_ref.comment_text가 필요합니다",
+      failed_step: "visit_start",
+    });
   }
 
   const pageUrl = resolveCommentPageUrl(targetRef);
   if (!pageUrl) {
     console.error(`[worker] comment skip job=${jobId} reason=missing_post_url`);
-    return {
-      ok: false,
-      jobId,
-      error: "comment: target_ref needs post_url or blog_id+log_no",
-    };
+    return failComment(jobId, {
+      error_code: "MISSING_POST_URL",
+      error_message: "target_ref에 post_url 또는 blog_id+log_no가 필요합니다",
+      failed_step: "visit_start",
+    });
   }
 
   const budgetMs = commentMaxMs();
@@ -392,7 +446,13 @@ export async function executeComment(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[worker] comment failed job=${jobId} error=${message}`);
-    return { ok: false, jobId, error: message.slice(0, 2000) };
+    const isTimeout = /timeout/i.test(message);
+    return failComment(jobId, {
+      error_code: isTimeout ? "TIMEOUT" : "UNKNOWN",
+      error_message: message,
+      failed_step: isTimeout ? "verify" : "unknown",
+      detail: { url: pageUrl },
+    });
   } finally {
     const toClose = pageRef.current;
     if (toClose) {

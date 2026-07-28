@@ -10,7 +10,7 @@ export type ExecutionLogEntry = {
   job_id: string;
   action_type: string;
   person_id: string;
-  status: "executed" | "failed" | "blocked" | "running";
+  status: "executed" | "failed" | "blocked" | "running" | "skipped" | "excluded";
   ok: boolean;
   error?: string | null;
   retry_count?: number;

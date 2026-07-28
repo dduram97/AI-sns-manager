@@ -50,6 +50,16 @@ export type CommentDraftResult = {
   /** Structured error for neighbor_feed (preferred over parsing errorMessage). */
   errorType?: NeighborCommentAiErrorType;
   situation?: CommentSituation;
+  /** Persistable draft analytics payload */
+  draftMeta?: CommentDraftMeta;
+};
+
+export type CommentDraftMeta = {
+  source_title: string;
+  source_summary: string;
+  generated_comment: string;
+  style_type: string;
+  generated_at: string;
 };
 
 export type CommentStyleFromPolicy = {
@@ -62,11 +72,12 @@ const DEFAULT_MODEL = "gpt-4o-mini";
 const DEFAULT_TIMEOUT_MS = 20_000;
 const NEIGHBOR_DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_CHARS = 120;
+/** Natural visitor comments stay short (about 15–40 chars). */
+const NEIGHBOR_MAX_CHARS = 42;
 const NEIGHBOR_CONTENT_MAX = 280;
 const NEIGHBOR_STYLE_EXAMPLES_MAX = 5;
-const HARD_FALLBACK = "글 잘 봤습니다. 내용이 좋네요.";
-const NEIGHBOR_FEED_FALLBACK =
-  "사진 보니까 분위기가 잘 느껴지네요 😊 이런 순간이 참 좋은 것 같아요";
+const HARD_FALLBACK = "사진 보니까 분위기가 좋네요 😊";
+const NEIGHBOR_FEED_FALLBACK = "사진 보니까 분위기가 정말 좋네요 😊";
 
 const NEIGHBOR_FEED_BANNED = [
   "글 잘 보고 갑니다",
@@ -76,8 +87,13 @@ const NEIGHBOR_FEED_BANNED = [
   "잘 보고 갑니다",
   "좋은 글 감사합니다",
   "유익한 정보",
+  "유익한 글",
   "도움 됐어요",
   "도움됐어요",
+  "정리 감사",
+  "참고할게요",
+  "잘 정리",
+  "좋은 정보네요",
 ];
 
 function mergedBanned(input: CommentDraftInput): string[] {
@@ -229,14 +245,48 @@ function buildMockDraft(input: CommentDraftInput): CommentDraftResult {
   const tip = input.title.trim() || "포스팅";
   const banned = mergedBanned(input);
   if (input.variant === "neighbor_feed") {
-    const snippet = tip.slice(0, 18);
-    const body = normalizeCommentDraft(
-      `${snippet} 이야기 읽으니까 장면이 그려지네요 😊 비슷한 경험 있으면 다음에 더 듣고 싶어요`,
-      { bannedPhrases: banned, maxChars: 160 },
-    );
+    const situation = input.situation ?? "공감";
+    const anchor = tip.replace(/\s+/g, " ").trim().slice(0, 8) || "사진";
+    const pool: Record<string, string[]> = {
+      맛집: [
+        `${anchor} 보니 음식이 정말 먹음직스럽네요`,
+        `다음에 한번 가보고 싶네요 😊`,
+        `${anchor} 분위기까지 좋아 보이네요`,
+      ],
+      여행: [
+        `${anchor} 코스 보니까 한번 가보고 싶네요`,
+        `사진만 봐도 여행 기분이 나네요`,
+        `${anchor} 풍경이 정말 좋네요 😊`,
+      ],
+      정보: [
+        `정리 잘 되어 있어서 이해하기 좋네요`,
+        `덕분에 좋은 포인트 알아갑니다`,
+        `${anchor} 부분 참고가 됐어요`,
+      ],
+      공감: [
+        `사진 보니까 분위기가 정말 좋네요 😊`,
+        `저도 비슷한 경험 있는데 공감됩니다`,
+        `${anchor} 이야기 읽으니 마음이 편해지네요`,
+        `이런 소소한 순간이 참 좋네요`,
+      ],
+    };
+    const options = pool[situation] ?? pool.공감!;
+    const idx =
+      Math.abs(
+        Array.from(tip).reduce((acc, ch) => acc + ch.charCodeAt(0), 0),
+      ) % options.length;
+    const body = normalizeCommentDraft(options[idx]!, {
+      bannedPhrases: banned,
+      maxChars: NEIGHBOR_MAX_CHARS,
+    });
     return {
       body: body || NEIGHBOR_FEED_FALLBACK,
-      alternatives: [],
+      alternatives: options.filter((_, i) => i !== idx).slice(0, 2).map((o) =>
+        normalizeCommentDraft(o, {
+          bannedPhrases: banned,
+          maxChars: NEIGHBOR_MAX_CHARS,
+        }),
+      ),
       source: "mock",
       model: null,
       situation: input.situation,
@@ -275,27 +325,25 @@ function buildMockDraft(input: CommentDraftInput): CommentDraftResult {
 function buildSystemPrompt(variant: CommentDraftVariant = "default"): string {
   if (variant === "neighbor_feed") {
     return [
-      "당신은 네이버 블로그 '서로이웃'에게 남길 댓글을 대신 씁니다.",
-      "목표: 글을 실제로 읽은 이웃처럼, 관계를 이어갈 자연스러운 한 마디.",
+      "당신은 네이버 블로그를 방문한 일반 방문자처럼 짧은 댓글을 씁니다.",
+      "목표: 글을 읽고 남기는 자연스러운 한 마디. 광고·과한 칭찬·반복 인사 금지.",
       "",
-      "필수:",
-      "- 한국어 1~2문장",
-      "- 글 제목·본문 요약에서 구체적 소재(메뉴/장소/장면/감정) 1개를 언급",
-      "- 공감 + 대화가 이어질 여지(궁금함·저장·다음에 참고 등)",
-      "- 이웃 관계 형성 목적 (일회성 방문 인사 금지)",
+      "길이: 한국어 15~40자 전후 (최대 1문장, 짧으면 좋음).",
+      "필수: 제목/요약에서 구체 소재 1개만 언급.",
       "",
-      "금지:",
-      "- 광고·홍보·팔로우 강요·링크·해시태그",
-      "- 너무 짧은 방문 인사 / 리뷰어 멘트",
-      "- 나쁜 예: 「글 잘 보고 갑니다」「좋은 정보 감사합니다」「잘 봤어요」「포스팅 잘 보고 갑니다」",
+      "스타일 가이드:",
+      "- 생활/일상: 「사진 보니까 분위기가 정말 좋네요 😊」 「저도 비슷한 경험 있는데 공감됩니다」",
+      "- 맛집: 「사진 보니 음식이 정말 먹음직스럽네요」 「다음에 한번 가보고 싶네요」",
+      "- 정보글: 「정리 잘 되어 있어서 이해하기 좋네요」 「덕분에 좋은 포인트 알아갑니다」",
+      "- 육아/반려동물: 「아이(강아지) 표정이 너무 귀엽네요」 「키우시는 정성이 느껴집니다」",
       "",
-      "좋은 방향 예시:",
-      "- 맛집: 「여기 분위기 너무 좋아 보이네요 😊 특히 소개해주신 메뉴 조합이 궁금해서 저장해두고 싶어요!」",
-      "- 일상: 「요즘 이런 소소한 일상이 제일 힐링되는 것 같아요 😊 사진 보니까 하루 분위기가 느껴져서 좋네요」",
-      "- 여행: 「여행 코스가 알차게 느껴져요 😊 다음에 비슷한 곳 가게 되면 참고하고 싶네요」",
+      "금지 (절대):",
+      "- 「좋은 정보 감사합니다」「유익한 글 잘 보고 갑니다」「글 잘 보고 갑니다」「포스팅 잘 보고 갑니다」",
+      "- 광고·홍보·팔로우 강요·링크·해시태그·과한 칭찬 나열",
+      "- 같은 문장 패턴 반복, 리뷰어/요약봇 말투",
       "",
       '- JSON만 출력: {"body":"...","alternatives":["..."]}',
-      "- alternatives는 0~2개, 다른 소재 각도",
+      "- alternatives는 0~2개, 서로 다른 소재/각도 (각각도 15~40자)",
     ].join("\n");
   }
   return [
@@ -362,9 +410,9 @@ function buildUserPrompt(input: CommentDraftInput): string {
       "",
       "작성 가이드:",
       "- 제목·요약·키워드에서 구체 소재 1개를 골라 언급",
-      "- 실제 글을 읽은 느낌 + 공감 + 가벼운 대화 여지",
-      "- 방문 인사·리뷰어 멘트·광고 금지",
-      "- 1~2문장, 이모지 0~2개 허용",
+      "- 실제 방문자가 남기는 짧은 공감 (15~40자)",
+      "- 방문 인사·리뷰어 멘트·광고·반복 패턴 금지",
+      "- 이모지 0~1개 허용",
       "",
       "내 댓글 스타일 참고(있으면):",
       examples,
@@ -566,7 +614,7 @@ async function generateNeighborViaOpenAi(
 
       const body = normalizeCommentDraft(parsed.body, {
         bannedPhrases: banned,
-        maxChars: 160,
+        maxChars: NEIGHBOR_MAX_CHARS,
       });
       if (!body) {
         const classified = classifyNeighborCommentAiError(
@@ -595,7 +643,7 @@ async function generateNeighborViaOpenAi(
         .map((a) =>
           normalizeCommentDraft(a, {
             bannedPhrases: banned,
-            maxChars: 160,
+            maxChars: NEIGHBOR_MAX_CHARS,
           }),
         )
         .filter((a) => a && a !== body)
@@ -889,5 +937,13 @@ export async function generateCommentDraftForPost(input: {
     situation,
     blogId: input.blogId,
   });
-  return { ...draft, situation };
+  const generated_at = new Date().toISOString();
+  const draftMeta: CommentDraftMeta = {
+    source_title: (input.title ?? "").trim().slice(0, 200),
+    source_summary: content.trim().slice(0, 280),
+    generated_comment: draft.body,
+    style_type: situation,
+    generated_at,
+  };
+  return { ...draft, situation, draftMeta };
 }

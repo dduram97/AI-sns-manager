@@ -6,8 +6,11 @@ import { resolveCompletedRange } from "@/lib/completedRange";
 import { createSupervisorRepos } from "@/repositories/index";
 import {
   countNeighborExecutedToday,
+  countNeighborFailedToday,
+  countNeighborExcludedToday,
   listNeighborCandidates,
 } from "@/services/neighborService";
+import { getNeighborDailyLimit } from "@/domain/policy/neighborPolicy";
 import type { TodaySummaryViewModel } from "@/types/todaySummary";
 
 export type { TodaySummaryViewModel } from "@/types/todaySummary";
@@ -90,12 +93,18 @@ export async function getTodaySummary(): Promise<TodaySummaryViewModel> {
     neighborFeedCompleted,
     candidates,
     neighborExecutedToday,
+    neighborFailedToday,
+    neighborExcludedToday,
+    policy,
     executedCommentsRes,
   ] = await Promise.all([
     repos.approval.listOpenInbox(),
     countNeighborFeedCompletedToday(db, todayRange.fromIso, todayRange.toIso),
     listNeighborCandidates(),
     countNeighborExecutedToday(),
+    countNeighborFailedToday(),
+    countNeighborExcludedToday(),
+    repos.policy.get(),
     db
       .from("action_jobs")
       .select("id, target_ref, action_type, status, executed_at")
@@ -122,6 +131,8 @@ export async function getTodaySummary(): Promise<TodaySummaryViewModel> {
     return !isNeighborFeedJob(ref);
   }).length;
 
+  const dailyLimit = getNeighborDailyLimit(policy);
+
   return {
     neighborFeed: {
       pending: neighborFeedPending,
@@ -130,6 +141,10 @@ export async function getTodaySummary(): Promise<TodaySummaryViewModel> {
     neighborRequest: {
       candidates: candidates.length,
       completed: neighborExecutedToday,
+      failed: neighborFailedToday,
+      excluded: neighborExcludedToday,
+      dailyLimit,
+      remaining: Math.max(0, dailyLimit - neighborExecutedToday),
     },
     comment: {
       pending: commentPending,

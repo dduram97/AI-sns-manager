@@ -23,6 +23,7 @@ import {
 } from "@/app/actions/neighbors";
 import { approveApprovalAction } from "@/app/actions/approvals";
 import { Button } from "@/components/ui/button";
+import { AppModal } from "@/components/ui/AppModal";
 import {
   formatApprovalFailureTime,
   toFriendlyFailure,
@@ -574,7 +575,27 @@ export function NeighborScreen({
         undefined,
         undefined,
       );
-      if (outcome.ok) {
+      if (outcome.excluded) {
+        const msg =
+          outcome.errorMessage?.trim() || "서로이웃 신청을 건너뛰었습니다.";
+        newFailReasons[personId] = msg;
+        setFailModal({
+          personId,
+          name: title,
+          raw: msg,
+        });
+        setFlow({
+          phase: "running",
+          total: personIds.length,
+          current: i + 1,
+          success,
+          failed,
+          waiting: Math.max(0, personIds.length - (i + 1)),
+          title,
+          statusKind: "failed",
+          nextDelaySec: null,
+        });
+      } else if (outcome.ok) {
         success += 1;
         succeededIds.push(personId);
         await markNeighborRequestedAction(personId);
@@ -690,6 +711,8 @@ export function NeighborScreen({
       {embedded ? (
         <NeighborQuotaHintSync
           todayExecuted={settings.today_executed}
+          todayFailed={settings.today_failed}
+          todayExcluded={settings.today_excluded}
           dailyLimit={settings.daily_request_limit}
           todayRemaining={settings.today_remaining}
         />
@@ -703,8 +726,10 @@ export function NeighborScreen({
           </Link>
           <h1 className="text-2xl font-semibold tracking-tight">서로이웃 관리</h1>
           <p className="text-sm text-muted-foreground">
-            오늘 {settings.today_executed}/{settings.daily_request_limit}건 사용 ·
-            남은 {settings.today_remaining}건
+            오늘 신청 {settings.today_executed}/{settings.daily_request_limit} ·
+            성공 {settings.today_executed}건 · 실패 {settings.today_failed}건 ·
+            제외 {settings.today_excluded}건 · 남은 한도{" "}
+            {settings.today_remaining}건
           </p>
         </header>
       )}
@@ -755,6 +780,10 @@ export function NeighborScreen({
           <NeighborCandidatesSummary
             candidateCount={candidates.length}
             todayExecuted={settings.today_executed}
+            todayFailed={settings.today_failed}
+            todayExcluded={settings.today_excluded}
+            dailyLimit={settings.daily_request_limit}
+            todayRemaining={settings.today_remaining}
           />
           <div className="flex flex-col gap-2">
             <Button
@@ -1953,12 +1982,31 @@ export function NeighborScreen({
       ) : null}
 
       {flow ? (
-        <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/45 p-4 sm:items-center">
-          <div className="w-full max-w-md rounded-2xl border border-border bg-background p-5 shadow-xl">
+        <AppModal
+          open
+          title={
+            flow.phase === "confirm"
+              ? "실행 확인"
+              : flow.phase === "duplicate"
+                ? "이미 서로이웃 처리한 블로그"
+                : flow.phase === "running"
+                  ? "서로이웃 신청 진행"
+                  : "서로이웃 신청 완료"
+          }
+          onClose={() => {
+            if (flow.phase === "running") return;
+            if (autoCloseRef.current) {
+              clearTimeout(autoCloseRef.current);
+              autoCloseRef.current = null;
+            }
+            setFlow(null);
+          }}
+          showCloseButton={flow.phase !== "running"}
+          footer={null}
+        >
             {flow.phase === "confirm" ? (
               <>
-                <h3 className="text-base font-semibold">실행 확인</h3>
-                <p className="mt-3 text-sm">
+                <p className="text-sm">
                   {flow.ids.length === 1
                     ? "서로이웃 신청 1건을 진행합니다."
                     : `선택한 ${flow.ids.length}건을 진행합니다.`}
@@ -2044,8 +2092,7 @@ export function NeighborScreen({
 
             {flow.phase === "running" ? (
               <>
-                <h3 className="text-base font-semibold">서로이웃 신청 진행</h3>
-                <dl className="mt-4 space-y-2 text-sm">
+                <dl className="space-y-2 text-sm">
                   <div className="flex justify-between">
                     <dt className="text-muted-foreground">전체</dt>
                     <dd>{flow.total}건</dd>
@@ -2081,13 +2128,22 @@ export function NeighborScreen({
                     다음 작업까지 약 {flow.nextDelaySec}초
                   </p>
                 ) : null}
+                <div className="mt-5 flex justify-end">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => setFlow(null)}
+                  >
+                    닫기
+                  </Button>
+                </div>
               </>
             ) : null}
 
             {flow.phase === "done" ? (
               <>
-                <h3 className="text-base font-semibold">서로이웃 신청 완료</h3>
-                <dl className="mt-4 space-y-2 text-sm">
+                <dl className="space-y-2 text-sm">
                   <div className="flex justify-between">
                     <dt>총</dt>
                     <dd>{flow.total}건</dd>
@@ -2101,56 +2157,59 @@ export function NeighborScreen({
                     <dd>{flow.failed}건</dd>
                   </div>
                 </dl>
-                <Button
-                  className="mt-5 w-full"
-                  onClick={() => {
-                    if (autoCloseRef.current) {
-                      clearTimeout(autoCloseRef.current);
-                      autoCloseRef.current = null;
-                    }
-                    setFlow(null);
-                    if (flow.success > 0) goToCompletedTab();
-                  }}
-                >
-                  확인
-                </Button>
-              </>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-
-      {failModal ? (
-        <div className="fixed inset-0 z-[70] flex items-end justify-center bg-black/45 p-4 sm:items-center">
-          <div className="w-full max-w-md rounded-2xl border border-border bg-background p-5 shadow-xl">
-            {(() => {
-              const friendly = toFriendlyFailure(
-                failModal.raw,
-                "neighbor_request",
-              );
-              return (
-                <>
-                  <h3 className="text-base font-semibold">
-                    {friendly.headline}
-                  </h3>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {failModal.name}
-                  </p>
-                  <p className="mt-4 text-sm">{friendly.cause}</p>
-                  <p className="mt-2 text-sm text-muted-foreground">
-                    {friendly.detail}
-                  </p>
+                <div className="mt-5 flex justify-end gap-2">
                   <Button
-                    className="mt-5 w-full"
-                    onClick={() => setFailModal(null)}
+                    variant="secondary"
+                    onClick={() => {
+                      if (autoCloseRef.current) {
+                        clearTimeout(autoCloseRef.current);
+                        autoCloseRef.current = null;
+                      }
+                      setFlow(null);
+                    }}
                   >
                     닫기
                   </Button>
-                </>
-              );
-            })()}
-          </div>
-        </div>
+                  <Button
+                    onClick={() => {
+                      if (autoCloseRef.current) {
+                        clearTimeout(autoCloseRef.current);
+                        autoCloseRef.current = null;
+                      }
+                      setFlow(null);
+                      if (flow.success > 0) goToCompletedTab();
+                    }}
+                  >
+                    확인
+                  </Button>
+                </div>
+              </>
+            ) : null}
+        </AppModal>
+      ) : null}
+
+      {failModal ? (
+        <AppModal
+          open
+          title={toFriendlyFailure(failModal.raw, "neighbor_request").headline}
+          onClose={() => setFailModal(null)}
+        >
+          {(() => {
+            const friendly = toFriendlyFailure(
+              failModal.raw,
+              "neighbor_request",
+            );
+            return (
+              <>
+                <p className="text-xs text-muted-foreground">{failModal.name}</p>
+                <p className="mt-3 text-sm">{friendly.cause}</p>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {friendly.detail}
+                </p>
+              </>
+            );
+          })()}
+        </AppModal>
       ) : null}
     </div>
   );

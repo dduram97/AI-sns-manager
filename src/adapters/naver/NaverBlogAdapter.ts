@@ -450,7 +450,8 @@ export class NaverBlogAdapter implements ChannelAdapter {
     }
 
     try {
-      let skipped = false;
+      /** already_liked | not_available | null */
+      let likeSkip: "already_liked" | "not_available" | null = null;
       await withPage(this.session, "like", async (page) => {
         console.log(
           `[TRACE] NaverBlogAdapter.like page.fn start url=${postUrl}`,
@@ -471,17 +472,20 @@ export class NaverBlogAdapter implements ChannelAdapter {
         traceSetCondition("alreadyLiked", probe.state === "on");
 
         if (probe.state === "on") {
-          skipped = true;
+          likeSkip = "already_liked";
           traceBlocked("already_liked", "(adapter probe)");
           console.log(
             `[NaverBlogAdapter:live] Like skipped (already red heart) → ${postUrl}`,
           );
-          // page fn returns; like() will RETURN already_liked
           return;
         }
         if (probe.state === "missing" || !probe.locator) {
+          likeSkip = "not_available";
           traceBlocked("no_locator", `probe.state=${probe.state}`);
-          throw new Error("Like button not found (Naver UI may have changed)");
+          console.info(
+            `[NaverBlogAdapter:live] Like not_available (no button) → ${postUrl}`,
+          );
+          return;
         }
 
         console.log(`[TRACE] NaverBlogAdapter.like calling clickSympathyIfOff`);
@@ -494,7 +498,7 @@ export class NaverBlogAdapter implements ChannelAdapter {
           throw new Error("Like button not clickable");
         }
         if (result.verifiedOn && !result.clicked) {
-          skipped = true;
+          likeSkip = "already_liked";
           return;
         }
 
@@ -520,7 +524,21 @@ export class NaverBlogAdapter implements ChannelAdapter {
         console.log(`[TRACE] NaverBlogAdapter.like page.fn success`);
       });
 
-      if (skipped) {
+      if (likeSkip === "not_available") {
+        traceReturn(
+          "NaverBlogAdapter.like",
+          "not_available",
+          "LIKE_BUTTON_NOT_AVAILABLE",
+        );
+        return {
+          ok: true,
+          externalRef: postUrl!,
+          outcome: "not_available",
+          reasonCode: "LIKE_BUTTON_NOT_AVAILABLE",
+          reasonMessage: "공감 버튼이 없는 글입니다.",
+        };
+      }
+      if (likeSkip === "already_liked") {
         traceReturn("NaverBlogAdapter.like", "already_liked", "skipped=true");
         return { ok: true, externalRef: postUrl!, skipped: true };
       }
@@ -528,7 +546,7 @@ export class NaverBlogAdapter implements ChannelAdapter {
         `[NaverBlogAdapter:live] Like executed → ${postUrl} (${blogId ?? "?"}/${logNo ?? "?"})`,
       );
       traceReturn("NaverBlogAdapter.like", "like_ok");
-      return { ok: true, externalRef: postUrl! };
+      return { ok: true, externalRef: postUrl!, outcome: "executed" };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       traceReturn("NaverBlogAdapter.like", "like_throw", msg.slice(0, 200));
@@ -637,6 +655,16 @@ export class NaverBlogAdapter implements ChannelAdapter {
         });
         await sleep(1_200);
 
+        const bodyText = (
+          (await page.locator("body").innerText().catch(() => "")) || ""
+        ).replace(/\s+/g, " ");
+        const hasMutualBtn = /서로이웃추가/.test(bodyText);
+        const hasOneWayBtn =
+          /이웃추가/.test(bodyText) && !/서로이웃추가/.test(bodyText);
+        if (hasOneWayBtn && !hasMutualBtn) {
+          throw new Error("NEIGHBOR_MUTUAL_NOT_AVAILABLE");
+        }
+
         const opened = await clickFirst(page, [
           'a:has-text("서로이웃추가")',
           'button:has-text("서로이웃추가")',
@@ -647,7 +675,7 @@ export class NaverBlogAdapter implements ChannelAdapter {
           'a[href*="buddyadd"]',
         ]);
         if (!opened) {
-          throw new Error("Neighbor request button not found");
+          throw new Error("NEIGHBOR_BUTTON_NOT_AVAILABLE");
         }
 
         await sleep(800);
@@ -683,6 +711,34 @@ export class NaverBlogAdapter implements ChannelAdapter {
       console.log(`[NaverBlogAdapter:live] mutual_request executed → ${url}`);
       return { ok: true, externalRef: url };
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/NEIGHBOR_BUTTON_NOT_AVAILABLE|button not found/i.test(msg)) {
+        return {
+          ok: true,
+          externalRef: url,
+          outcome: "excluded",
+          reasonCode: "NEIGHBOR_BUTTON_NOT_AVAILABLE",
+          reasonMessage: "서로이웃 신청 버튼 없음",
+        };
+      }
+      if (/NEIGHBOR_MUTUAL_NOT_AVAILABLE/i.test(msg)) {
+        return {
+          ok: true,
+          externalRef: url,
+          outcome: "excluded",
+          reasonCode: "NEIGHBOR_MUTUAL_NOT_AVAILABLE",
+          reasonMessage: "서로이웃이 불가한 블로그입니다.",
+        };
+      }
+      if (/ALREADY_NEIGHBOR|already neighbor/i.test(msg)) {
+        return {
+          ok: true,
+          externalRef: url,
+          outcome: "excluded",
+          reasonCode: "ALREADY_NEIGHBOR",
+          reasonMessage: "이미 이웃인 블로그입니다.",
+        };
+      }
       return fail(err);
     }
   }

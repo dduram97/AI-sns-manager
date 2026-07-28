@@ -950,6 +950,62 @@ export function createApprovalRepository(db: DatabaseClient) {
       );
     },
 
+    /**
+     * Soft skip / excluded — not counted as success quota or hard failure.
+     * Stores execution_result on target_ref for Admin UI.
+     */
+    async markJobSkipped(
+      jobId: string,
+      input: {
+        status: "skipped" | "excluded";
+        reasonCode: string;
+        reasonMessage: string;
+        failedStep?: string;
+        outcome?: string;
+        detail?: Record<string, unknown>;
+      },
+    ): Promise<ActionJob> {
+      const existing = await this.getActionJob(jobId);
+      const prev =
+        existing.target_ref &&
+        typeof existing.target_ref === "object" &&
+        !Array.isArray(existing.target_ref)
+          ? { ...(existing.target_ref as Record<string, unknown>) }
+          : {};
+      const target_ref = {
+        ...prev,
+        execution_result: {
+          outcome: input.outcome ?? input.status,
+          reason_code: input.reasonCode,
+          reason_message: input.reasonMessage,
+          failed_step: input.failedStep ?? "unknown",
+          detail: input.detail,
+          failure_reason: {
+            code: input.reasonCode,
+            message: input.reasonMessage,
+          },
+        },
+      };
+      const { data, error } = await db
+        .from("action_jobs")
+        .update({
+          status: input.status,
+          error: `[${input.reasonCode}] ${input.reasonMessage}`.slice(0, 2000),
+          target_ref,
+        })
+        .eq("id", jobId)
+        .in("status", ["running", "planned", "approved", "failed"])
+        .select("*")
+        .single();
+      return mapActionJob(
+        assertData(
+          data,
+          error,
+          "ApprovalRepository.markJobSkipped",
+        ) as Record<string, unknown>,
+      );
+    },
+
     /** Live execution: planned|approved|failed → running */
     async markJobRunning(jobId: string): Promise<ActionJob> {
       const { data, error } = await db

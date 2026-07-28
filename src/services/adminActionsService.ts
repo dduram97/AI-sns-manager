@@ -2,6 +2,7 @@
  * Phase 3-5: Admin action_jobs history.
  */
 
+import { detailUrl, parseActionJobFailure } from "@/lib/actionJobFailure";
 import { createServiceClient } from "@/lib/supabase";
 
 export type AdminActionRow = {
@@ -17,6 +18,17 @@ export type AdminActionRow = {
   approvedBy: string | null;
   error: string | null;
   workerTest: boolean;
+  failure: {
+    errorCode: string;
+    errorMessage: string;
+    failedStep: string;
+    failedStepLabel: string;
+    retryable: boolean;
+    url: string | null;
+    steps: string[];
+    kind: "failure" | "skipped" | "excluded";
+    summary: string;
+  } | null;
 };
 
 export type AdminActionsScreenData = {
@@ -27,6 +39,7 @@ export type AdminActionsScreenData = {
     approved: number;
     executed: number;
     failed: number;
+    skipped: number;
     running: number;
   };
 };
@@ -98,6 +111,19 @@ function mapActionRows(
           : null
         : null);
 
+    const error = typeof r.error === "string" ? r.error : null;
+    const parsed = parseActionJobFailure({
+      error,
+      targetRef: ref,
+      status,
+    });
+    const isFailed =
+      status === "failed" || status === "permanently_failed";
+    const isSoft =
+      status === "skipped" ||
+      status === "excluded" ||
+      (parsed != null && parsed.kind !== "failure");
+
     return {
       id: String(r.id),
       actionType: String(r.action_type ?? ""),
@@ -109,8 +135,22 @@ function mapActionRows(
       completedAt,
       approvedAt: typeof r.approved_at === "string" ? r.approved_at : null,
       approvedBy: typeof r.approved_by === "string" ? r.approved_by : null,
-      error: typeof r.error === "string" ? r.error : null,
+      error,
       workerTest: ref.worker_test === true,
+      failure:
+        (isFailed || isSoft) && parsed
+          ? {
+              errorCode: parsed.errorCode,
+              errorMessage: parsed.errorMessage,
+              failedStep: parsed.failedStep,
+              failedStepLabel: parsed.failedStepLabel,
+              retryable: parsed.retryable,
+              url: detailUrl(parsed.detail) ?? targetUrl,
+              steps: parsed.steps,
+              kind: parsed.kind,
+              summary: parsed.summary,
+            }
+          : null,
     };
   });
 
@@ -121,6 +161,9 @@ function mapActionRows(
     executed: rows.filter((r) => r.status === "executed").length,
     failed: rows.filter(
       (r) => r.status === "failed" || r.status === "permanently_failed",
+    ).length,
+    skipped: rows.filter(
+      (r) => r.status === "skipped" || r.status === "excluded",
     ).length,
     running: rows.filter((r) => r.status === "running").length,
   };

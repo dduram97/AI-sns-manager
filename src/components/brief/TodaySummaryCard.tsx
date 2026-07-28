@@ -51,6 +51,7 @@ type TodayTask = {
   actionLabel: string;
   href?: string;
   onAction?: () => void;
+  meta?: string;
 };
 
 function neighborRequestHref(data: TodaySummaryViewModel): string {
@@ -81,11 +82,12 @@ function buildTodayTasks(data: TodaySummaryViewModel): TodayTask[] {
       title: "🤝 서로이웃 후보",
       pending: data.neighborRequest.candidates,
       completed: data.neighborRequest.completed,
-      total: data.neighborRequest.candidates + data.neighborRequest.completed,
+      total: data.neighborRequest.dailyLimit,
       unit: "명",
-      completedLabel: "신청 완료",
+      completedLabel: "신청 성공",
       actionLabel: "후보 보기",
       href: neighborRequestHref(data),
+      meta: `실패 ${data.neighborRequest.failed}건 · 제외 ${data.neighborRequest.excluded}건 · 남은 한도 ${data.neighborRequest.remaining}건`,
     },
     {
       id: "neighbor-feed",
@@ -144,6 +146,9 @@ function TodayTaskCard({ task }: { task: TodayTask }) {
               {task.unit}
             </span>
           </p>
+          {task.meta ? (
+            <p className="mt-0.5 text-[11px] text-muted-foreground">{task.meta}</p>
+          ) : null}
         </div>
       </div>
 

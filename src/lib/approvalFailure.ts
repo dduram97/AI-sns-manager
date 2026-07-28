@@ -37,6 +37,36 @@ export function toFriendlyFailure(
   const msg = raw.toLowerCase();
 
   if (
+    /LIKE_BUTTON_NOT_AVAILABLE|LIKE_BUTTON_NOT_FOUND/i.test(raw) ||
+    /공감 버튼이 없는 글/.test(raw)
+  ) {
+    return {
+      stage: "like",
+      cause: "공감 버튼이 없는 글입니다.",
+      detail: "이 글은 공감 처리 대상이 아닙니다.",
+      headline: "공감 불가",
+    };
+  }
+
+  if (/서로이웃이 불가한 블로그|NEIGHBOR_MUTUAL_NOT_AVAILABLE/i.test(raw)) {
+    return {
+      stage: "adapter",
+      cause: "서로이웃이 불가한 블로그입니다.",
+      detail: "이 블로그는 자동 제외 목록에 추가됩니다.",
+      headline: "서로이웃 불가",
+    };
+  }
+
+  if (/이미 이웃인 블로그|ALREADY_NEIGHBOR/i.test(raw)) {
+    return {
+      stage: "adapter",
+      cause: "이미 이웃인 블로그입니다.",
+      detail: "중복 신청하지 않고 건너뜁니다.",
+      headline: "이미 이웃",
+    };
+  }
+
+  if (
     /relogin|login required|logged_out|needs_relogin|captcha|세션|로그인/i.test(
       msg,
     )

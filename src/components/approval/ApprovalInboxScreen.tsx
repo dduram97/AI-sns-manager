@@ -13,6 +13,7 @@ import {
 import { getAgentBriefAction } from "@/app/actions/brief";
 import { ApprovalCard } from "@/components/approval/ApprovalCard";
 import { Button } from "@/components/ui/button";
+import { AppModal } from "@/components/ui/AppModal";
 import {
   approvalModeLabel,
   type ApprovalExecuteMode,
@@ -876,18 +877,25 @@ function BatchFlowModal({
   onCloseDone: () => void;
   onViewFailures: () => void;
 }) {
+  const close =
+    progress.phase === "running" || progress.phase === "checking"
+      ? onCloseDone
+      : progress.phase === "done"
+        ? onCloseDone
+        : onCancelConfirm;
+
   if (progress.phase === "checking") {
     return (
-      <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/45 p-4 sm:items-center">
-        <div className="w-full max-w-md rounded-2xl border border-border bg-background p-5 shadow-xl">
-          <h3 className="text-base font-semibold tracking-tight">
-            중복 확인 중
-          </h3>
-          <p className="mt-3 text-sm text-muted-foreground">
-            이미 처리한 포스팅이 있는지 확인하고 있습니다…
-          </p>
+      <AppModal open title="중복 확인 중" onClose={close} footer={null}>
+        <p className="text-sm text-muted-foreground">
+          이미 처리한 포스팅이 있는지 확인하고 있습니다…
+        </p>
+        <div className="mt-5 flex justify-end">
+          <Button type="button" size="sm" variant="secondary" onClick={close}>
+            닫기
+          </Button>
         </div>
-      </div>
+      </AppModal>
     );
   }
 
@@ -895,172 +903,165 @@ function BatchFlowModal({
     const dupCount = progress.duplicates.length;
     const remain = Math.max(0, progress.total - dupCount);
     return (
-      <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/45 p-4 sm:items-center">
-        <div className="w-full max-w-md rounded-2xl border border-border bg-background p-5 shadow-xl">
-          <h3 className="text-base font-semibold tracking-tight">
-            이미 처리한 포스팅이 있습니다.
-          </h3>
-          <p className="mt-2 text-xs text-muted-foreground">
-            중복 {dupCount}건 · 신규 {remain}건
-          </p>
-          <ul className="mt-4 max-h-56 space-y-3 overflow-y-auto">
-            {progress.duplicates.map((d) => (
-              <li
-                key={d.approvalId}
-                className="rounded-lg bg-secondary/60 px-3 py-2.5 text-sm"
-              >
-                <p className="font-medium leading-snug">{d.title}</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  처리 종류: {approvalModeLabel(d.priorMode)}
-                </p>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  마지막 처리일: {formatApprovalFailureTime(d.lastExecutedAt)}
-                </p>
-              </li>
-            ))}
-          </ul>
-          <div className="mt-5 flex flex-col gap-2">
-            <Button className="w-full" onClick={onExcludeDuplicates}>
-              중복 제외 실행
-              {remain > 0 ? ` (${remain})` : ""}
-            </Button>
-            <Button
-              variant="outline"
-              className="w-full"
-              onClick={onForceRunDuplicates}
+      <AppModal
+        open
+        title="이미 처리한 포스팅이 있습니다."
+        onClose={onCancelConfirm}
+        footer={null}
+      >
+        <p className="text-xs text-muted-foreground">
+          중복 {dupCount}건 · 신규 {remain}건
+        </p>
+        <ul className="mt-4 max-h-56 space-y-3 overflow-y-auto">
+          {progress.duplicates.map((d) => (
+            <li
+              key={d.approvalId}
+              className="rounded-lg bg-secondary/60 px-3 py-2.5 text-sm"
             >
-              그래도 실행 ({progress.total})
-            </Button>
-            <Button variant="ghost" className="w-full" onClick={onCancelConfirm}>
-              취소
-            </Button>
-          </div>
+              <p className="font-medium leading-snug">{d.title}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                처리 종류: {approvalModeLabel(d.priorMode)}
+              </p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                마지막 처리일: {formatApprovalFailureTime(d.lastExecutedAt)}
+              </p>
+            </li>
+          ))}
+        </ul>
+        <div className="mt-5 flex flex-col gap-2">
+          <Button className="w-full" onClick={onExcludeDuplicates}>
+            중복 제외 실행
+            {remain > 0 ? ` (${remain})` : ""}
+          </Button>
+          <Button
+            variant="outline"
+            className="w-full"
+            onClick={onForceRunDuplicates}
+          >
+            그래도 실행 ({progress.total})
+          </Button>
+          <Button variant="ghost" className="w-full" onClick={onCancelConfirm}>
+            취소
+          </Button>
         </div>
-      </div>
+      </AppModal>
     );
   }
 
   if (progress.phase === "confirm") {
     return (
-      <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/45 p-4 sm:items-center">
-        <div className="w-full max-w-md rounded-2xl border border-border bg-background p-5 shadow-xl">
-          <h3 className="text-base font-semibold tracking-tight">
-            실행 확인
-          </h3>
-          <p className="mt-3 text-sm">
-            선택한 {progress.total}건을 실행합니다.
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            모드: {progress.modeLabel}
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            예상 소요시간: {progress.etaLabel}
-          </p>
-          <p className="mt-3 text-sm font-medium">실행하시겠습니까?</p>
-          <div className="mt-5 grid grid-cols-2 gap-2">
-            <Button variant="outline" onClick={onCancelConfirm}>
-              취소
-            </Button>
-            <Button onClick={onConfirmRun}>실행</Button>
-          </div>
+      <AppModal open title="실행 확인" onClose={onCancelConfirm} footer={null}>
+        <p className="text-sm">선택한 {progress.total}건을 실행합니다.</p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          모드: {progress.modeLabel}
+        </p>
+        <p className="mt-1 text-sm text-muted-foreground">
+          예상 소요시간: {progress.etaLabel}
+        </p>
+        <p className="mt-3 text-sm font-medium">실행하시겠습니까?</p>
+        <div className="mt-5 grid grid-cols-2 gap-2">
+          <Button variant="outline" onClick={onCancelConfirm}>
+            취소
+          </Button>
+          <Button onClick={onConfirmRun}>실행</Button>
         </div>
-      </div>
+      </AppModal>
     );
   }
 
   if (progress.phase === "done") {
     return (
-      <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/45 p-4 sm:items-center">
-        <div className="w-full max-w-md rounded-2xl border border-border bg-background p-5 shadow-xl">
-          <h3 className="text-base font-semibold tracking-tight">
-            처리 완료되었습니다.
-          </h3>
-          <dl className="mt-4 space-y-2 text-sm">
-            <div className="flex justify-between">
-              <dt className="text-muted-foreground">총 처리</dt>
-              <dd className="font-medium">{progress.total}건</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-muted-foreground">성공</dt>
-              <dd className="font-medium">{progress.success}건</dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-muted-foreground">실패</dt>
-              <dd className="font-medium">{progress.failed}건</dd>
-            </div>
-          </dl>
-          <div className="mt-5 flex flex-col gap-2">
-            {progress.failed > 0 ? (
-              <Button variant="outline" className="w-full" onClick={onViewFailures}>
-                실패 건 보기
-              </Button>
-            ) : null}
-            <Button
-              className="w-full"
-              onClick={() => {
-                onCloseDone();
-              }}
-            >
-              확인
-            </Button>
+      <AppModal
+        open
+        title="처리 완료되었습니다."
+        onClose={onCloseDone}
+        footer={null}
+      >
+        <dl className="space-y-2 text-sm">
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">총 처리</dt>
+            <dd className="font-medium">{progress.total}건</dd>
           </div>
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">성공</dt>
+            <dd className="font-medium">{progress.success}건</dd>
+          </div>
+          <div className="flex justify-between">
+            <dt className="text-muted-foreground">실패</dt>
+            <dd className="font-medium">{progress.failed}건</dd>
+          </div>
+        </dl>
+        <div className="mt-5 flex flex-col gap-2">
+          {progress.failed > 0 ? (
+            <Button variant="outline" className="w-full" onClick={onViewFailures}>
+              실패 건 보기
+            </Button>
+          ) : null}
+          <Button className="w-full" onClick={onCloseDone}>
+            닫기
+          </Button>
         </div>
-      </div>
+      </AppModal>
     );
   }
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/45 p-4 sm:items-center">
-      <div className="w-full max-w-md rounded-2xl border border-border bg-background p-5 shadow-xl">
-        <h3 className="text-base font-semibold tracking-tight">
-          자동 처리 진행 중
-        </h3>
-        <dl className="mt-4 space-y-2.5 text-sm">
-          <div className="flex justify-between gap-3">
-            <dt className="text-muted-foreground">전체</dt>
-            <dd className="font-medium">{progress.total}건</dd>
-          </div>
-          <div className="flex justify-between gap-3">
-            <dt className="text-muted-foreground">현재 처리</dt>
-            <dd className="font-medium">
-              {progress.current} / {progress.total}
-            </dd>
-          </div>
-          <div className="flex justify-between gap-3">
-            <dt className="text-muted-foreground">성공</dt>
-            <dd>{progress.success}건</dd>
-          </div>
-          <div className="flex justify-between gap-3">
-            <dt className="text-muted-foreground">실패</dt>
-            <dd>{progress.failed}건</dd>
-          </div>
-          <div className="flex justify-between gap-3">
-            <dt className="text-muted-foreground">대기</dt>
-            <dd>{progress.waiting}건</dd>
-          </div>
-          <div className="rounded-lg bg-secondary/60 px-3 py-2">
-            <p className="text-[11px] text-muted-foreground">현재</p>
-            <p className="mt-1 text-sm font-medium leading-snug">
-              {progress.currentTitle}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              처리 유형: {progress.modeLabel}
-            </p>
-            <p className="mt-1 text-sm">
-              상태: {statusDisplay(progress.statusKind)}
-            </p>
-          </div>
-          {progress.nextDelaySec != null ? (
-            <p className="text-center text-sm text-muted-foreground">
-              다음 작업까지 약 {progress.nextDelaySec}초
-            </p>
-          ) : null}
-        </dl>
-        <p className="mt-4 text-center text-[11px] text-muted-foreground">
-          백그라운드 처리 중 · 새 창을 열지 않습니다
-        </p>
+    <AppModal
+      open
+      title="자동 처리 진행 중"
+      onClose={onCloseDone}
+      footer={null}
+    >
+      <dl className="space-y-2.5 text-sm">
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">전체</dt>
+          <dd className="font-medium">{progress.total}건</dd>
+        </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">현재 처리</dt>
+          <dd className="font-medium">
+            {progress.current} / {progress.total}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">성공</dt>
+          <dd>{progress.success}건</dd>
+        </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">실패</dt>
+          <dd>{progress.failed}건</dd>
+        </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">대기</dt>
+          <dd>{progress.waiting}건</dd>
+        </div>
+        <div className="rounded-lg bg-secondary/60 px-3 py-2">
+          <p className="text-[11px] text-muted-foreground">현재</p>
+          <p className="mt-1 text-sm font-medium leading-snug">
+            {progress.currentTitle}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            처리 유형: {progress.modeLabel}
+          </p>
+          <p className="mt-1 text-sm">
+            상태: {statusDisplay(progress.statusKind)}
+          </p>
+        </div>
+        {progress.nextDelaySec != null ? (
+          <p className="text-center text-sm text-muted-foreground">
+            다음 작업까지 약 {progress.nextDelaySec}초
+          </p>
+        ) : null}
+      </dl>
+      <p className="mt-4 text-center text-[11px] text-muted-foreground">
+        백그라운드 처리 중 · Chrome 창이 화면에 뜨지 않습니다
+      </p>
+      <div className="mt-5 flex justify-end">
+        <Button type="button" size="sm" variant="secondary" onClick={onCloseDone}>
+          닫기
+        </Button>
       </div>
-    </div>
+    </AppModal>
   );
 }
 

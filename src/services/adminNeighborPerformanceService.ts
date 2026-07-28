@@ -2,6 +2,8 @@
  * Phase 4-1: Admin neighbor performance list + status refresh helpers.
  */
 
+import { detailUrl, parseActionJobFailure } from "@/lib/actionJobFailure";
+import { resolveCompletedRange } from "@/lib/completedRange";
 import { createServiceClient } from "@/lib/supabase";
 
 export type NeighborRequestStatus =
@@ -37,6 +39,17 @@ export type AdminNeighborsScreenData = {
     rejected: number;
     unknown: number;
   };
+  /** Today's failed neighbor_request jobs (for ops failure visibility). */
+  recentFailures: Array<{
+    id: string;
+    blogId: string | null;
+    targetUrl: string | null;
+    failedAt: string | null;
+    errorCode: string;
+    errorMessage: string;
+    failedStepLabel: string;
+    retryable: boolean;
+  }>;
 };
 
 function daysBetween(fromIso: string | null, now = Date.now()): number | null {
@@ -121,7 +134,49 @@ export async function getAdminNeighborsScreenData(opts?: {
     unknown: rows.filter((r) => r.requestStatus === "unknown").length,
   };
 
-  return { rows, counts };
+  const since = resolveCompletedRange({ preset: "today" }).fromIso;
+  const { data: failedJobs } = await db
+    .from("action_jobs")
+    .select("id, target_ref, error, updated_at, status")
+    .eq("action_type", "neighbor_request")
+    .in("status", ["failed", "permanently_failed"])
+    .gte("updated_at", since)
+    .order("updated_at", { ascending: false })
+    .limit(40);
+
+  const recentFailures = (failedJobs ?? []).map((r) => {
+    const ref = (r.target_ref ?? {}) as Record<string, unknown>;
+    const error = typeof r.error === "string" ? r.error : null;
+    const parsed = parseActionJobFailure({ error, targetRef: ref });
+    const blogId =
+      typeof ref.blog_id === "string"
+        ? ref.blog_id
+        : typeof ref.blogId === "string"
+          ? ref.blogId
+          : null;
+    const targetUrl =
+      typeof ref.blog_url === "string"
+        ? ref.blog_url
+        : typeof ref.post_url === "string"
+          ? ref.post_url
+          : blogId
+            ? `https://m.blog.naver.com/${blogId}`
+            : detailUrl(parsed?.detail ?? null);
+    return {
+      id: String(r.id),
+      blogId,
+      targetUrl,
+      failedAt:
+        parsed?.failedAt ??
+        (typeof r.updated_at === "string" ? r.updated_at : null),
+      errorCode: parsed?.errorCode ?? "UNKNOWN",
+      errorMessage: parsed?.errorMessage ?? error ?? "실패",
+      failedStepLabel: parsed?.failedStepLabel ?? "알 수 없음",
+      retryable: parsed?.retryable ?? true,
+    };
+  });
+
+  return { rows, counts, recentFailures };
 }
 
 /**
@@ -209,6 +264,18 @@ export type AdminActionDetailData = {
     executedAt: string | null;
     draftBody: string | null;
     targetRef: Record<string, unknown>;
+    error: string | null;
+    failure: {
+      errorCode: string;
+      errorMessage: string;
+      failedStep: string;
+      failedStepLabel: string;
+      retryable: boolean;
+      url: string | null;
+      steps: string[];
+      kind: "failure" | "skipped" | "excluded";
+      summary: string;
+    } | null;
   };
   candidateScore: number | null;
   blogId: string | null;
@@ -229,13 +296,26 @@ export async function getAdminActionDetail(
   const { data: job, error } = await db
     .from("action_jobs")
     .select(
-      "id, action_type, status, risk, draft_body, target_ref, created_at, executed_at",
+      "id, action_type, status, risk, draft_body, target_ref, created_at, executed_at, error",
     )
     .eq("id", jobId)
     .maybeSingle();
   if (error || !job) return null;
 
   const ref = (job.target_ref ?? {}) as Record<string, unknown>;
+  const jobError = typeof job.error === "string" ? job.error : null;
+  const status = String(job.status ?? "");
+  const parsed = parseActionJobFailure({
+    error: jobError,
+    targetRef: ref,
+    status,
+  });
+  const isFailed =
+    status === "failed" || status === "permanently_failed";
+  const isSoft =
+    status === "skipped" ||
+    status === "excluded" ||
+    (parsed != null && parsed.kind !== "failure");
   const blogId =
     typeof ref.blog_id === "string"
       ? ref.blog_id
@@ -327,6 +407,21 @@ export async function getAdminActionDetail(
       executedAt: typeof job.executed_at === "string" ? job.executed_at : null,
       draftBody: typeof job.draft_body === "string" ? job.draft_body : null,
       targetRef: ref,
+      error: jobError,
+      failure:
+        (isFailed || isSoft) && parsed
+          ? {
+              errorCode: parsed.errorCode,
+              errorMessage: parsed.errorMessage,
+              failedStep: parsed.failedStep,
+              failedStepLabel: parsed.failedStepLabel,
+              retryable: parsed.retryable,
+              url: detailUrl(parsed.detail) ?? blogUrl,
+              steps: parsed.steps,
+              kind: parsed.kind,
+              summary: parsed.summary,
+            }
+          : null,
     },
     candidateScore: candidateScore ?? discovery?.score ?? null,
     blogId,

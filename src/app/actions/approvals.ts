@@ -38,7 +38,7 @@ export async function approveApprovalAction(
   approvalId: string,
   draftBody?: string,
   mode?: ApprovalExecuteMode,
-): Promise<{ ok: boolean; errorMessage?: string }> {
+): Promise<{ ok: boolean; errorMessage?: string; excluded?: boolean }> {
   try {
     const result = await approveApproval(approvalId, draftBody, { mode });
     revalidateSupervisorPaths();

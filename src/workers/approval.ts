@@ -125,12 +125,18 @@ export async function enqueueApproval(
       target_ref.comment_situation = generated.situation;
       target_ref.ai_draft_source = generated.source;
       if (generated.model) target_ref.ai_draft_model = generated.model;
+      if (generated.draftMeta) {
+        target_ref.comment_draft = generated.draftMeta;
+      }
       commentMeta = {
         comment_situation: generated.situation,
         ai_draft_source: generated.source,
         ai_draft_model: generated.model,
         post_title: title || null,
         post_summary: content ? content.slice(0, 280) : null,
+        ...(generated.draftMeta
+          ? { comment_draft: generated.draftMeta }
+          : {}),
       };
     } catch (err) {
       console.warn(

@@ -12,10 +12,14 @@ export function NeighborPageHeaderClient() {
 /** Sync quota line once settings arrive from NeighborScreen. */
 export function NeighborQuotaHintSync({
   todayExecuted,
+  todayFailed = 0,
+  todayExcluded = 0,
   dailyLimit,
   todayRemaining,
 }: {
   todayExecuted: number;
+  todayFailed?: number;
+  todayExcluded?: number;
   dailyLimit: number;
   todayRemaining: number;
 }) {
@@ -23,9 +27,16 @@ export function NeighborQuotaHintSync({
 
   useEffect(() => {
     setQuotaHint(
-      `오늘 ${todayExecuted}/${dailyLimit}건 사용 · 남은 ${todayRemaining}건`,
+      `오늘 신청 ${todayExecuted}/${dailyLimit} · 성공 ${todayExecuted}건 · 실패 ${todayFailed}건 · 제외 ${todayExcluded}건 · 남은 한도 ${todayRemaining}건`,
     );
-  }, [dailyLimit, setQuotaHint, todayExecuted, todayRemaining]);
+  }, [
+    dailyLimit,
+    setQuotaHint,
+    todayExecuted,
+    todayExcluded,
+    todayFailed,
+    todayRemaining,
+  ]);
 
   return null;
 }

@@ -29,6 +29,9 @@ function statusBadgeClass(status: string): string {
       return "bg-emerald-500/15 text-emerald-800 dark:text-emerald-200";
     case "running":
       return "bg-violet-500/15 text-violet-800 dark:text-violet-200";
+    case "skipped":
+    case "excluded":
+      return "bg-slate-500/15 text-slate-700 dark:text-slate-200";
     case "failed":
     case "permanently_failed":
       return "bg-rose-500/15 text-rose-800 dark:text-rose-200";
@@ -70,7 +73,7 @@ export function AdminActionsScreen({
         <p className="text-sm text-muted-foreground">
           총 {data.counts.total} · planned {data.counts.planned} · approved{" "}
           {data.counts.approved} · executed {data.counts.executed} · failed{" "}
-          {data.counts.failed}
+          {data.counts.failed} · skipped/excluded {data.counts.skipped}
         </p>
         <div className="flex flex-wrap gap-2 pt-1 text-xs">
           <Link
@@ -205,7 +208,39 @@ export function AdminActionsScreen({
                   </p>
                 ) : null}
               </div>
-              {row.error ? (
+              {row.failure ? (
+                <div
+                  className={`mt-2 space-y-0.5 rounded-md px-2.5 py-2 text-[11px] ${
+                    row.failure.kind === "failure"
+                      ? "bg-rose-500/5 text-rose-700 dark:text-rose-300"
+                      : "bg-slate-500/10 text-slate-700 dark:text-slate-200"
+                  }`}
+                >
+                  <p className="font-medium">{row.failure.summary}</p>
+                  <p>
+                    failed_step: {row.failure.failedStep} (
+                    {row.failure.failedStepLabel})
+                  </p>
+                  <p>
+                    error_code: {row.failure.errorCode}
+                  </p>
+                  <p>detail: {row.failure.errorMessage}</p>
+                  {row.failure.kind === "failure" ? (
+                    <p>
+                      재시도:{" "}
+                      {row.failure.retryable ? "가능" : "권장하지 않음"}
+                    </p>
+                  ) : null}
+                  {row.failure.url ? (
+                    <p className="truncate">URL: {row.failure.url}</p>
+                  ) : null}
+                  {row.failure.steps.length > 0 ? (
+                    <p className="truncate opacity-80">
+                      trail: {row.failure.steps.join(" → ")}
+                    </p>
+                  ) : null}
+                </div>
+              ) : row.error ? (
                 <p className="mt-1 line-clamp-2 text-[11px] text-rose-600 dark:text-rose-300">
                   {row.error}
                 </p>

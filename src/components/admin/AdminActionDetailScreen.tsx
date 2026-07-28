@@ -83,6 +83,38 @@ export function AdminActionDetailScreen({
             {job.draftBody}
           </p>
         ) : null}
+        {job.failure ? (
+          <div
+            className={`space-y-1 rounded-md px-3 py-2 text-xs ${
+              job.failure.kind === "failure"
+                ? "bg-rose-500/5 text-rose-700 dark:text-rose-300"
+                : "bg-slate-500/10 text-slate-700 dark:text-slate-200"
+            }`}
+          >
+            <p className="font-medium">{job.failure.summary}</p>
+            <p>
+              failed_step: {job.failure.failedStep} (
+              {job.failure.failedStepLabel})
+            </p>
+            <p>error_code: {job.failure.errorCode}</p>
+            <p>detail: {job.failure.errorMessage}</p>
+            {job.failure.kind === "failure" ? (
+              <p>
+                재시도: {job.failure.retryable ? "가능" : "권장하지 않음"}
+              </p>
+            ) : null}
+            {job.failure.url ? (
+              <p className="truncate">URL: {job.failure.url}</p>
+            ) : null}
+            {job.failure.steps.length > 0 ? (
+              <p className="truncate">
+                trail: {job.failure.steps.join(" → ")}
+              </p>
+            ) : null}
+          </div>
+        ) : job.error ? (
+          <p className="text-xs text-rose-600">{job.error}</p>
+        ) : null}
       </section>
 
       <section className="rounded-xl border border-border/70 bg-card px-4 py-3 space-y-2">

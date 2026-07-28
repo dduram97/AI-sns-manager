@@ -54,7 +54,10 @@ export type ActionJobStatus =
   | "expired"
   | "failed"
   | "permanently_failed"
-  | "skipped_policy";
+  | "skipped_policy"
+  | "skipped"
+  | "excluded"
+  | "partial_success";
 
 export type ActivityKind =
   | "executed"

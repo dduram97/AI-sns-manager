@@ -245,6 +245,8 @@ function toExecutionPort(repos: SupervisorRepos): ActionExecutionPort {
     markJobExecuted: (jobId) => repos.approval.markJobExecuted(jobId),
     markJobFailed: (jobId, message) =>
       repos.approval.markJobFailed(jobId, message),
+    markJobSkipped: (jobId, input) =>
+      repos.approval.markJobSkipped(jobId, input),
     updateRelationship: (personId, patch) =>
       repos.person.updateRelationship(personId, patch),
     updateWorkflow: (workflowId, patch) =>
@@ -577,6 +579,9 @@ export async function regenerateApprovalCommentDraft(
       ? `neighbor_feed_${generated.source}`
       : generated.source,
     ai_draft_model: generated.model,
+    ...(generated.draftMeta
+      ? { comment_draft: generated.draftMeta }
+      : {}),
     ...(isNeighborFeed
       ? {
           ai_draft_generated_at: generatedAt,
@@ -816,7 +821,11 @@ export async function approveApproval(
   approvalId: string,
   draftBody?: string,
   options?: ApproveApprovalOptions,
-): Promise<{ ok: boolean; errorMessage?: string }> {
+): Promise<{
+  ok: boolean;
+  errorMessage?: string;
+  excluded?: boolean;
+}> {
   const repos = createSupervisorRepos(createServiceClient());
   const approval = await repos.approval.getById(approvalId);
   if (!approval || approval.resolved_at) {
@@ -903,6 +912,19 @@ export async function approveApproval(
       }
       return { ok: false, errorMessage: likeOutcome.errorMessage };
     }
+    if (likeOutcome.softSkipped) {
+      // CASE A: like alone, no button — not a failure; do not skip comment permanently as "done"
+      await finishApproveSuccess(
+        repos,
+        approval,
+        job,
+        `like_unprocessed:${likeOutcome.skipReasonCode ?? "LIKE_BUTTON_NOT_AVAILABLE"}`,
+      );
+      if (!options?.skipBriefRefresh) {
+        await refreshBriefAfterMutation(repos);
+      }
+      return { ok: true };
+    }
     await skipJobQuietly(repos, job, "approval_mode_like_only");
     await finishApproveSuccess(repos, approval, job, "like");
     if (!options?.skipBriefRefresh) {
@@ -947,6 +969,40 @@ export async function approveApproval(
     return { ok: false, errorMessage: outcome.errorMessage };
   }
 
+  if (outcome.excluded && job.action_type === "neighbor_request") {
+    const msg =
+      outcome.skipReasonMessage?.trim() || "서로이웃 신청을 건너뛰었습니다.";
+    await repos.approval.resolve(approval.id);
+    try {
+      const ref = (job.target_ref ?? {}) as Record<string, unknown>;
+      const blogId =
+        typeof ref.blog_id === "string"
+          ? ref.blog_id
+          : typeof ref.blogId === "string"
+            ? ref.blogId
+            : null;
+      if (blogId) {
+        await repos.neighborExclusion.exclude({
+          blog_id: blogId,
+          blog_name:
+            typeof ref.blog_name === "string" ? ref.blog_name : null,
+          blog_url:
+            typeof ref.blog_url === "string" ? ref.blog_url : null,
+          note: `[${outcome.skipReasonCode ?? "EXCLUDED"}] ${msg}`,
+        });
+      }
+    } catch (err) {
+      console.warn(
+        "[approveApproval] neighbor exclusion upsert:",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    if (!options?.skipBriefRefresh) {
+      await refreshBriefAfterMutation(repos);
+    }
+    return { ok: false, errorMessage: msg, excluded: true };
+  }
+
   if (runLike && bundledLike) {
     const likeOutcome = await executeActionJob(port, bundledLike, {
       personDisplayName,
@@ -966,6 +1022,19 @@ export async function approveApproval(
         ok: false,
         errorMessage: `댓글은 성공 · 공감 실패: ${likeOutcome.errorMessage ?? "error"}`,
       };
+    }
+    // CASE B: like soft-skipped (no button) — overall success with partial record
+    if (likeOutcome.softSkipped) {
+      await finishApproveSuccess(
+        repos,
+        approval,
+        job,
+        `comment+like_skipped:${likeOutcome.skipReasonCode ?? "LIKE_BUTTON_NOT_AVAILABLE"}`,
+      );
+      if (!options?.skipBriefRefresh) {
+        await refreshBriefAfterMutation(repos);
+      }
+      return { ok: true };
     }
   } else if (runLike && findExecutedBundledLike(job, siblings)) {
     // like already executed in this bundle — skip duplicate

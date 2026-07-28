@@ -272,6 +272,20 @@ export function createRepositories(db: DatabaseClient) {
       return approval.markJobRunning(jobId);
     },
 
+    async markActionSkipped(
+      jobId: string,
+      input: {
+        status: "skipped" | "excluded";
+        reasonCode: string;
+        reasonMessage: string;
+        failedStep?: string;
+        outcome?: string;
+        detail?: Record<string, unknown>;
+      },
+    ): Promise<ActionJob> {
+      return approval.markJobSkipped(jobId, input);
+    },
+
     async markActionFailed(jobId: string, message: string): Promise<ActionJob> {
       return approval.markJobFailed(jobId, message);
     },

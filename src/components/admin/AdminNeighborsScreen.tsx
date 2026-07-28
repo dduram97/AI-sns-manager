@@ -88,6 +88,9 @@ export function AdminNeighborsScreen({
         <p className="text-sm text-muted-foreground">
           신청 {data.counts.total} · 대기 {data.counts.requested} · 수락{" "}
           {data.counts.accepted} · 미확인 {data.counts.unknown}
+          {data.recentFailures.length > 0
+            ? ` · 오늘 실패 ${data.recentFailures.length}`
+            : ""}
         </p>
         <div className="flex flex-wrap gap-2 pt-1 text-xs">
           <Link
@@ -104,6 +107,47 @@ export function AdminNeighborsScreen({
           </Link>
         </div>
       </header>
+
+      {data.recentFailures.length > 0 ? (
+        <section className="space-y-2">
+          <h2 className="text-sm font-semibold tracking-tight">
+            오늘 신청 실패 ({data.recentFailures.length})
+          </h2>
+          <div className="flex flex-col gap-2">
+            {data.recentFailures.map((f) => (
+              <article
+                key={f.id}
+                className="rounded-xl border border-rose-500/30 bg-rose-500/5 px-4 py-3"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-semibold">
+                    {f.blogId ?? "—"}
+                  </span>
+                  <span className="rounded-md bg-rose-500/15 px-2 py-0.5 text-[11px] font-medium text-rose-800">
+                    failed
+                  </span>
+                  <Link
+                    href={`/admin/actions/${f.id}`}
+                    className="text-[11px] text-primary underline-offset-2 hover:underline"
+                  >
+                    상세
+                  </Link>
+                </div>
+                <p className="mt-1 text-[11px] text-rose-700">
+                  ❌ 실패 · 단계: {f.failedStepLabel}
+                </p>
+                <p className="text-[11px] text-rose-700">
+                  사유: {f.errorMessage}
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  재시도: {f.retryable ? "가능" : "권장하지 않음"}
+                  {f.targetUrl ? ` · ${f.targetUrl}` : ""}
+                </p>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <div className="flex flex-wrap gap-2">
         {(
